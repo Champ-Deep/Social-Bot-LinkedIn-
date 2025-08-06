@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkedin-automation
+  labels:
+    name: linkedin-automation
+    app.kubernetes.io/name: linkedin-automation
+    app.kubernetes.io/component: namespace

@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linkedin-config
+  namespace: linkedin-automation
+  labels:
+    app: linkedin-automation
+    component: config
+data:
+  config.json: |
+    {
+      "redis": {
+        "host": "redis",
+        "port": 6379,
+        "db": 0
+      },
+      "security": {
+        "encryption_key_file": "/app/data/.encryption_key",
+        "max_login_attempts": 3,
+        "session_timeout": 3600,
+        "rate_limit_window": 3600,
+        "enable_2fa": false
+      },
+      "linkedin": {
+        "likes_per_hour": 30,
+        "likes_per_day": 150,
+        "comments_per_hour": 10,
+        "comments_per_day": 50,
+        "shares_per_hour": 5,
+        "shares_per_day": 20,
+        "follows_per_hour": 20,
+        "follows_per_day": 100,
+        "connections_per_hour": 10,
+        "connections_per_day": 50,
+        "like_cooldown": 10,
+        "comment_cooldown": 60,
+        "share_cooldown": 120,
+        "follow_cooldown": 30,
+        "connection_cooldown": 60,
+        "business_hours": [9, 18],
+        "peak_hours": [10, 11, 14, 15],
+        "weekend_activity": 0.3,
+        "random_delay_range": [2, 10],
+        "headless": true,
+        "browser_type": "playwright"
+      },
+      "content_analysis": {
+        "use_local_models": false,
+        "model_name": "gpt-3.5-turbo",
+        "cache_ttl": 3600,
+        "min_relevance_score": 0.5,
+        "min_quality_score": 0.4,
+        "target_industries": ["technology", "finance", "healthcare"],
+        "target_keywords": ["AI", "machine learning", "innovation", "digital transformation"],
+        "excluded_keywords": ["politics", "controversial"]
+      },
+      "conversation": {
+        "use_local_models": false,
+        "model_name": "gpt-3.5-turbo",
+        "cache_ttl": 3600,
+        "min_confidence_score": 0.7,
+        "min_quality_score": 0.6,
+        "min_relevance_score": 0.6,
+        "max_alternatives": 3,
+        "diversity_threshold": 0.8
+      },
+      "log_level": "INFO",
+      "max_workers": 10,
+      "health_check_interval": 30
+    }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: linkedin-secrets
+  namespace: linkedin-automation
+  labels:
+    app: linkedin-automation
+    component: secrets
+type: Opaque
+data:
+  # Base64 encoded values - replace with actual values
+  # echo -n "your-openai-api-key" | base64
+  openai-api-key: eW91ci1vcGVuYWktYXBpLWtleQ==
+  # echo -n "your-encryption-key" | base64
+  encryption-key: eW91ci1lbmNyeXB0aW9uLWtleQ==

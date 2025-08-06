@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkedin-orchestrator
+  namespace: linkedin-automation
+  labels:
+    app: linkedin-orchestrator
+    component: orchestrator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linkedin-orchestrator
+  template:
+    metadata:
+      labels:
+        app: linkedin-orchestrator
+        component: orchestrator
+    spec:
+      containers:
+      - name: orchestrator
+        image: linkedin-automation:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: linkedin-secrets
+              key: openai-api-key
+        - name: LINKEDIN_HEADLESS
+          value: "true"
+        - name: LINKEDIN_BROWSER_TYPE
+          value: "playwright"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        - name: logs-volume
+          mountPath: /app/logs
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: linkedin-logs-pvc
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linkedin-orchestrator
+  namespace: linkedin-automation
+  labels:
+    app: linkedin-orchestrator
+    component: orchestrator
+spec:
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  selector:
+    app: linkedin-orchestrator
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linkedin-data-pvc
+  namespace: linkedin-automation
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: linkedin-logs-pvc
+  namespace: linkedin-automation
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

@@ -1,0 +1,438 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: account-manager
+  namespace: linkedin-automation
+  labels:
+    app: account-manager
+    component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: account-manager
+  template:
+    metadata:
+      labels:
+        app: account-manager
+        component: agent
+    spec:
+      containers:
+      - name: account-manager
+        image: linkedin-automation:latest
+        args: ["--agents", "account_manager"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: LINKEDIN_HEADLESS
+          value: "true"
+        - name: LINKEDIN_BROWSER_TYPE
+          value: "playwright"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        - name: sessions-volume
+          mountPath: /app/sessions
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+      - name: sessions-volume
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: content-analyzer
+  namespace: linkedin-automation
+  labels:
+    app: content-analyzer
+    component: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: content-analyzer
+  template:
+    metadata:
+      labels:
+        app: content-analyzer
+        component: agent
+    spec:
+      containers:
+      - name: content-analyzer
+        image: linkedin-automation:latest
+        args: ["--agents", "content_analysis"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: linkedin-secrets
+              key: openai-api-key
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: interaction-agent
+  namespace: linkedin-automation
+  labels:
+    app: interaction-agent
+    component: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: interaction-agent
+  template:
+    metadata:
+      labels:
+        app: interaction-agent
+        component: agent
+    spec:
+      containers:
+      - name: interaction-agent
+        image: linkedin-automation:latest
+        args: ["--agents", "interaction"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: LINKEDIN_HEADLESS
+          value: "true"
+        - name: LINKEDIN_BROWSER_TYPE
+          value: "playwright"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        - name: sessions-volume
+          mountPath: /app/sessions
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+      - name: sessions-volume
+        emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conversation-agent
+  namespace: linkedin-automation
+  labels:
+    app: conversation-agent
+    component: agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: conversation-agent
+  template:
+    metadata:
+      labels:
+        app: conversation-agent
+        component: agent
+    spec:
+      containers:
+      - name: conversation-agent
+        image: linkedin-automation:latest
+        args: ["--agents", "conversation"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: linkedin-secrets
+              key: openai-api-key
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: safety-agent
+  namespace: linkedin-automation
+  labels:
+    app: safety-agent
+    component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: safety-agent
+  template:
+    metadata:
+      labels:
+        app: safety-agent
+        component: agent
+    spec:
+      containers:
+      - name: safety-agent
+        image: linkedin-automation:latest
+        args: ["--agents", "safety"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "125m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler-agent
+  namespace: linkedin-automation
+  labels:
+    app: scheduler-agent
+    component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scheduler-agent
+  template:
+    metadata:
+      labels:
+        app: scheduler-agent
+        component: agent
+    spec:
+      containers:
+      - name: scheduler-agent
+        image: linkedin-automation:latest
+        args: ["--agents", "scheduler"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "125m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-agent
+  namespace: linkedin-automation
+  labels:
+    app: analytics-agent
+    component: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analytics-agent
+  template:
+    metadata:
+      labels:
+        app: analytics-agent
+        component: agent
+    spec:
+      containers:
+      - name: analytics-agent
+        image: linkedin-automation:latest
+        args: ["--agents", "analytics"]
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: LOG_LEVEL
+          value: "INFO"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+        - name: data-volume
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "125m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config-volume
+        configMap:
+          name: linkedin-config
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: linkedin-data-pvc
