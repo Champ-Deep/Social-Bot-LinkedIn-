@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # LinkedIn Automation API
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: linkedin-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Database - Supabase
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      # API Settings
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # Feature flags
+      - ENABLE_AI_COMMENTS=${ENABLE_AI_COMMENTS:-true}
+      - ENABLE_ADVANCED_ANALYTICS=${ENABLE_ADVANCED_ANALYTICS:-true}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    volumes:
+      - app_data:/app/data
+      - app_logs:/app/logs
+    networks:
+      - linkedin-network
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7.2-alpine
+    container_name: linkedin-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - linkedin-network
+
+volumes:
+  app_data:
+    driver: local
+  app_logs:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  linkedin-network:
+    driver: bridge
