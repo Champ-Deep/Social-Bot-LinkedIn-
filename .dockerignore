@@ -1,0 +1,96 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment files (secrets)
+.env
+.env.*
+!.env.example
+
+# Test files
+tests/
+test_*.py
+*_test.py
+pytest.ini
+test_campaigns.db
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Frontend (not needed in API container)
+frontend-new/
+frontend-next/
+
+# Logs and data (mounted as volumes)
+logs/
+data/
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# Backup files
+*.bak
+*.backup
+Dockerfile.backup
+
+# Audit and reports
+*_REPORT.md
+*_SUMMARY.md
+audit_screenshots/
+*_results.json
+
+# Node modules (if any)
+node_modules/
+package-lock.json
+
+# Docker files (avoid recursion)
+docker-compose*.yml
+!docker-compose.prod.yml
+
+# Config files for other environments
+config/
+monitoring/
+deployment/
