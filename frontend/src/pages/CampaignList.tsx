@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import gsap from 'gsap';
-import { Plus, Filter, Search, Loader2 } from 'lucide-react';
+import { Plus, Search, Loader2 } from 'lucide-react';
 import { CampaignCard } from '@/components/campaigns/CampaignCard';
 import { campaignApi } from '@/lib/api';
 import { useGeneralWebSocket } from '@/hooks/useWebSocket';

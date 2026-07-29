@@ -19,7 +19,7 @@ export function useWebSocket(url: string, options: UseWebSocketOptions = {}) {
   const [lastMessage, setLastMessage] = useState<WSMessage | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const queryClient = useQueryClient();
 
   const connect = () => {

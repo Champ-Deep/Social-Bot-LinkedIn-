@@ -25,6 +25,8 @@ class CampaignActions(BaseModel):
     """Actions to perform on target URLs."""
     like: bool = True
     comment: bool = False
+    share: bool = False
+    follow: bool = False
     comment_templates: Optional[List[str]] = Field(
         default=None,
         description="Custom comment templates (uses AI if not provided)"
@@ -49,10 +51,10 @@ class CampaignCreate(BaseModel):
         max_length=100,
         description="LinkedIn URLs to engage with"
     )
-    account_ids: List[uuid.UUID] = Field(
+    account_ids: List[str] = Field(
         ...,
         min_length=1,
-        description="LinkedIn account IDs to use for engagement"
+        description="Connected account IDs to use for engagement"
     )
     actions: CampaignActions = Field(
         default_factory=CampaignActions,
@@ -99,7 +101,7 @@ class CampaignUpdate(BaseModel):
     )
     description: Optional[str] = None
     target_urls: Optional[List[str]] = Field(default=None, min_length=1)
-    account_ids: Optional[List[uuid.UUID]] = Field(default=None, min_length=1)
+    account_ids: Optional[List[str]] = Field(default=None, min_length=1)
     actions: Optional[CampaignActions] = None
     priority: Optional[int] = Field(default=None, ge=1, le=3)
     scheduled_start_at: Optional[datetime] = None

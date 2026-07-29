@@ -7,6 +7,12 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Base tokens referenced by index.css (@apply border-border, etc.).
+        border: '#e2e8f0',
+        input: '#e2e8f0',
+        ring: '#0a66c2',
+        background: '#ffffff',
+        foreground: '#0f172a',
         linkedin: {
           50: '#e7f3ff',
           100: '#d0e7ff',

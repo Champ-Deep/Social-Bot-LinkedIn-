@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import campaigns, me
+from src.api.routes import agents, campaigns, me
 
 API_V1_PREFIX = "/api/v1"
 
@@ -91,9 +91,49 @@ app.add_middleware(
 # Mount routers under the versioned API prefix.
 app.include_router(campaigns.router, prefix=API_V1_PREFIX)
 app.include_router(me.router, prefix=API_V1_PREFIX)
+app.include_router(agents.router, prefix=API_V1_PREFIX)
 
 
 @app.get("/healthz", tags=["system"])
 async def healthz() -> dict:
     """Liveness probe."""
     return {"status": "ok"}
+
+
+def _mount_frontend() -> None:
+    """
+    Serve the built React SPA (frontend/dist) so the whole product is one URL.
+
+    Mounted last so it never shadows /api or /healthz. Unknown non-API paths
+    fall through to index.html for client-side routing. No-ops if the build is
+    absent (e.g. running the API alone in tests).
+    """
+    import os
+
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    dist = os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist")
+    dist = os.path.abspath(dist)
+    index_file = os.path.join(dist, "index.html")
+    if not os.path.isdir(dist) or not os.path.isfile(index_file):
+        logger.info("Frontend build not found at %s; serving API only", dist)
+        return
+
+    assets_dir = os.path.join(dist, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    async def _spa_root() -> FileResponse:
+        return FileResponse(index_file)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_catch_all(full_path: str) -> FileResponse:
+        # API/system routes are matched earlier; everything else is the SPA.
+        return FileResponse(index_file)
+
+    logger.info("Serving frontend SPA from %s", dist)
+
+
+_mount_frontend()

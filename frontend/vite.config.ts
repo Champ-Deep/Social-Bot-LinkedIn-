@@ -13,14 +13,19 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      // Pass /api/v1/* straight through to the backend (no path rewrite):
+      // the backend serves the versioned prefix directly.
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
       },
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true,
+      },
+      '/healthz': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
       },
     },
   },
