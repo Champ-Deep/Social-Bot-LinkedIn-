@@ -7,6 +7,8 @@ agent runtime. This module exposes the ``app`` object that
 ``tests/test_campaigns_api.py`` and ``uvicorn src.api.main:app`` import.
 """
 
+import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,18 +18,43 @@ from src.api.routes import campaigns
 
 API_V1_PREFIX = "/api/v1"
 
+logger = logging.getLogger("api")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Application lifespan.
 
-    Redis pool, the campaign<->agent task bridge (MessageOrchestrator), and the
-    ``events:*`` result consumer are attached to ``app.state`` here in later
-    Phase 0 tasks. Kept intentionally minimal for now so the app boots with no
-    external services during tests.
+    Connects Redis and attaches the campaign<->agent task bridge
+    (``MessageOrchestrator``) to ``app.state`` so campaign starts hand work to
+    the interaction agents. If Redis is unreachable the app still boots with the
+    bridge unset, and campaign starts degrade to the "orchestrator not
+    configured" path rather than failing. (The httpx test transport does not run
+    lifespan, so tests always take the degraded path.)
     """
-    yield
+    app.state.redis = None
+    app.state.task_orchestrator = None
+
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    try:
+        from redis import asyncio as aioredis
+
+        from src.infrastructure.task_bridge import MessageOrchestrator
+
+        client = aioredis.from_url(redis_url, decode_responses=True)
+        await client.ping()
+        app.state.redis = client
+        app.state.task_orchestrator = MessageOrchestrator(client)
+        logger.info("Connected to Redis; task bridge active")
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        logger.warning("Redis unavailable (%s); campaign execution degraded", exc)
+
+    try:
+        yield
+    finally:
+        if app.state.redis is not None:
+            await app.state.redis.aclose()
 
 
 app = FastAPI(
