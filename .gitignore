@@ -193,3 +193,6 @@ frontend/node_modules/
 # Frontend source lib dir is NOT the Python build lib/
 !frontend/src/lib/
 !frontend/src/lib/**
+
+test_campaigns.db
+*.db
