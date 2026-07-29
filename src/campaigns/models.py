@@ -7,13 +7,20 @@ These models map to the Supabase tables created via SQL.
 import uuid
 from datetime import datetime
 from typing import Optional, List, Any
-from sqlalchemy import String, Integer, Text, DateTime, ForeignKey, Enum as SQLEnum
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import (
+    String, Integer, Text, DateTime, ForeignKey,
+    JSON, Uuid,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 import enum
 
 from src.database.models import Base
+
+# Cross-dialect aliases: native UUID/JSONB on Postgres, portable equivalents on
+# SQLite (used in tests and lightweight demos). Keeps a single schema everywhere.
+UUID = Uuid
+JSONB = JSON
 
 
 class CampaignStatusEnum(str, enum.Enum):

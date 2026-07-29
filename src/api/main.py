@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import campaigns
+from src.api.routes import campaigns, me
 
 API_V1_PREFIX = "/api/v1"
 
@@ -35,6 +35,21 @@ async def lifespan(app: FastAPI):
     """
     app.state.redis = None
     app.state.task_orchestrator = None
+
+    # Bootstrap schema creation for first deploys (Postgres or SQLite). For
+    # production migrations use Alembic; this is a convenience for greenfield
+    # environments and is off unless explicitly enabled.
+    if os.getenv("AUTO_CREATE_TABLES", "").lower() == "true":
+        try:
+            from src.database.models import Base, import_all_models
+            from src.database.session import engine
+
+            import_all_models()
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("AUTO_CREATE_TABLES: schema ensured")
+        except Exception as exc:  # pragma: no cover - depends on runtime DB
+            logger.warning("AUTO_CREATE_TABLES failed: %s", exc)
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     try:
@@ -75,6 +90,7 @@ app.add_middleware(
 
 # Mount routers under the versioned API prefix.
 app.include_router(campaigns.router, prefix=API_V1_PREFIX)
+app.include_router(me.router, prefix=API_V1_PREFIX)
 
 
 @app.get("/healthz", tags=["system"])
