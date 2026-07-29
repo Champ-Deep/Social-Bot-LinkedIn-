@@ -1,82 +1,66 @@
-# Core dependencies
-asyncio==3.4.3
-aiohttp==3.8.4
-redis==4.5.4
-asyncio-mqtt==0.16.1
-pydantic==1.10.7
-python-dotenv==1.0.0
-uvloop==0.17.0
+# Core runtime dependencies (API + agent runtime).
+# Heavy ML/NLP libraries live in requirements-ml.txt so the API image and the
+# default agent runtime install fast and don't need Torch/transformers.
+# Install ML extras with:  pip install -r requirements-ml.txt
 
-# LinkedIn automation
-selenium==4.9.0
-playwright==1.32.1
-beautifulsoup4==4.12.2
-requests==2.28.2
+# --- Async / core ---
+aiohttp>=3.9,<4
+redis>=5.0,<6
+python-dotenv>=1.0,<2
+uvloop>=0.19,<0.20; sys_platform != "win32"
+tenacity>=8.2,<9
 
-# AI/ML dependencies
-openai==0.27.4
-transformers==4.28.1
-torch==2.0.0
-scikit-learn==1.2.2
-numpy==1.24.3
-pandas==2.0.1
-nltk==3.8.1
-spacy==3.5.2
-sentence-transformers==2.2.2
+# --- Web framework / API ---
+fastapi>=0.110,<0.116
+uvicorn[standard]>=0.29,<0.35
+gunicorn>=21.2,<23
+websockets>=12.0,<13
+python-multipart>=0.0.9,<0.1
 
-# Message queue and communication
-celery==5.2.7
-kombu==5.2.4
-pika==1.3.1
-aiokafka==0.8.0
+# --- Data validation ---
+pydantic>=2.6,<3
+pydantic-settings>=2.2,<3
+email-validator>=2.1,<3
 
-# Database
-sqlalchemy==2.0.10
-alembic==1.10.3
-asyncpg==0.27.0
-motor==3.1.2
-pymongo==4.3.3
+# --- LinkedIn automation (Playwright fallback transport) ---
+playwright>=1.42,<2
+beautifulsoup4>=4.12,<5
+requests>=2.31,<3
+# Native mobile-API transport (primary): TLS-fingerprinted HTTP client
+curl_cffi>=0.6,<0.8
 
-# Security
-cryptography==40.0.2
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-pycryptodome==3.17.0
+# --- LLM (all inference routed through OpenRouter) ---
+openai>=1.30,<2          # used as the OpenRouter-compatible client
+httpx>=0.27,<0.28
 
-# Monitoring and logging
-prometheus-client==0.16.0
-python-json-logger==2.0.7
-sentry-sdk==1.19.1
-structlog==23.1.0
-elastic-apm==6.15.1
+# --- Database ---
+sqlalchemy[asyncio]>=2.0.29,<2.1
+alembic>=1.13,<2
+asyncpg>=0.29,<0.31
+aiosqlite>=0.20,<0.21    # SQLite async driver for local/test runs
 
-# Testing
-pytest==7.3.1
-pytest-asyncio==0.21.0
-pytest-cov==4.0.0
-pytest-mock==3.10.0
-faker==18.6.0
-factory-boy==3.2.1
+# --- Auth (Clerk) ---
+pyjwt[crypto]>=2.8,<3    # verify Clerk session JWTs against JWKS
 
-# Development tools
-black==23.3.0
-flake8==6.0.0
-mypy==1.2.0
-pre-commit==3.2.2
-isort==5.12.0
+# --- Security ---
+cryptography>=42.0,<44   # Fernet encryption of account credentials
 
-# Deployment
-gunicorn==20.1.0
-uvicorn==0.21.1
-docker==6.0.1
-kubernetes==26.1.0
+# --- Monitoring / logging ---
+prometheus-client>=0.20,<0.22
+structlog>=24.1,<25
 
-# Utilities
-python-dateutil==2.8.2
-pytz==2023.3
-httpx==0.24.0
-tenacity==8.2.2
-click==8.1.3
-rich==13.3.4
-pyyaml==6.0
-orjson==3.8.10
+# --- Utilities ---
+python-dateutil>=2.9,<3
+pytz>=2024.1
+click>=8.1,<9
+rich>=13.7,<14
+pyyaml>=6.0,<7
+orjson>=3.9,<4
+
+# --- Testing ---
+pytest>=8.1,<9
+pytest-asyncio>=0.23,<0.25
+pytest-cov>=5.0,<6
+pytest-mock>=3.12,<4
+fakeredis>=2.21,<3
+faker>=24.0,<25

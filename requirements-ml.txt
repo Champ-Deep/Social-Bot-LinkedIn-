@@ -1,0 +1,15 @@
+# Heavy ML / NLP dependencies.
+# Only needed for the local-model content analysis / NLP features
+# (ContentAnalysisAgent embeddings, local fallback generation). The API and
+# the OpenRouter-based content/classification path do NOT require these.
+#
+# Install with:  pip install -r requirements-ml.txt
+
+numpy>=1.26,<2
+pandas>=2.2,<3
+scikit-learn>=1.4,<2
+nltk>=3.8,<4
+spacy>=3.7,<4
+sentence-transformers>=2.6,<3
+transformers>=4.39,<5
+torch>=2.2,<3
