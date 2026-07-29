@@ -28,6 +28,10 @@ beautifulsoup4>=4.12,<5
 requests>=2.31,<3
 # Native mobile-API transport (primary): TLS-fingerprinted HTTP client
 curl_cffi>=0.6,<0.8
+# Selenium is still imported by the legacy account_manager/interaction agents.
+# These become optional once those imports are made lazy in the mobile-transport phase.
+selenium>=4.19,<5
+undetected-chromedriver>=3.5,<4
 
 # --- LLM (all inference routed through OpenRouter) ---
 openai>=1.30,<2          # used as the OpenRouter-compatible client
