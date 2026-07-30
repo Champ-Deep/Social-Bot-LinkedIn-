@@ -21,6 +21,10 @@ and how the **admin dashboard** aggregates activity across all accounts.
   import people → agent suggests who to contact and what to say → a human
   approves/edits/rejects → paced send under a global per-account cap. This is
   the product's spine; see §4a. Nothing reaches LinkedIn without an approval.
+- **Every new account is warmed up before it may do outreach** (§4b): a staged
+  programme where each stage unlocks capability rather than just raising a
+  limit, minimum ~21 days, graduation gated on time + activity + acceptance
+  rate, with automatic demotion on a challenge or a collapsed acceptance rate.
 - **The mobile transport now calls real Voyager endpoints** (whoami, invite,
   message, like, comment, post, profile, inbox) over a TLS-fingerprinted
   session with a stable per-account device identity, with Playwright as the
@@ -71,6 +75,13 @@ Key modules:
 | Copy quality gate (anti-spam) | `src/outreach/quality.py` | REAL |
 | Humanistic copywriting | `src/outreach/copy.py` | REAL (LLM + template fallback) |
 | Approve / paced send executor | `src/outreach/execute.py` | REAL |
+| Warm-up programme + gating | `src/warmup/program.py` | REAL |
+| Daily activity planner | `src/warmup/planner.py` | REAL |
+| Activity ledger | `src/warmup/models.py`, `src/warmup/service.py` | REAL |
+| Acceptance-rate governor | `src/outreach/health.py` | REAL |
+| Sequences + pause-on-reply | `src/outreach/sequences.py` | REAL |
+| Acceptance/reply sync | `src/outreach/sync.py` | REAL (needs live validation) |
+| Read-only preflight | `src/accounts/preflight.py` | REAL |
 | Global rate limiter | `src/infrastructure/rate_policy.py` | REAL |
 | OpenRouter LLM (2 slots) | `src/infrastructure/llm/*` | REAL |
 | Campaign→agent bridge | `src/infrastructure/task_bridge.py` | REAL |
@@ -177,6 +188,114 @@ What is NOT yet proven:
 Ban-risk posture (why mobile-first): mobile-API traffic with stable per-account
 fingerprints + the global daily caps (§5) is far lower risk than headless
 Chromium. Playwright stays as the fallback only.
+
+---
+
+## 4b. The warm-up programme — how a fresh account becomes safe
+
+A freshly-connected account is the most fragile object in this system. It has
+no history on this device, no recent activity, and the single strongest
+predictor of a restriction is a quiet account that suddenly starts doing
+outreach. Volume limits don't protect against that — the *shape of the ramp*
+does.
+
+Every new account walks a fixed programme (`src/warmup/program.py`):
+
+```
+observe  2d   like only                    build device/session history
+react    3d   + follow                     establish an interest graph
+converse 4d   + comment                    earn profile views
+publish  5d   + post                       contribute, don't only consume
+connect  7d   + connection requests        small volume, warm targets only
+full     --   + follow-up messages         full programme
+```
+
+**Stages declare capability, not just volume.** `program.is_allowed(stage,
+action)` is a hard gate: during `observe`, an invitation isn't rate-limited to
+zero, it is unreachable — `suggest.py` won't propose it and `execute.py` won't
+send it. This is the property to preserve if you touch this code. Capability is
+earned with tenure rather than being available on day one and discouraged by
+policy.
+
+**Graduation needs three things together**: elapsed days, completed activity
+(`requires`, counted from the durable ledger), and a healthy acceptance rate.
+An account that waited a month and did nothing does not advance; nor does one
+that crammed a stage's activity into a single day. Time alone is the mistake
+that gets accounts banned in week three.
+
+**Demotion is a feature.** A LinkedIn challenge, or acceptance falling below
+15%, steps the account *back* a stage automatically. That is the system acting
+before LinkedIn does.
+
+### Organic behaviour (`src/warmup/planner.py`)
+
+Turning a stage into a day's activity is where "looks human" is won or lost:
+
+- Volumes are sampled from **ranges**, never fixed. Exactly 12 likes every day
+  is as detectable as 500.
+- Optional actions carry a **probability below 1.0**, so some days are genuinely
+  empty. Real people miss days; schedulers don't.
+- Actions are **scattered unevenly** across the active-hours window with a
+  minimum gap, producing the clustered-then-quiet rhythm real usage has.
+- **Weekends are reduced, not skipped** — an account that works exactly
+  Monday-to-Friday is its own signature.
+
+The plan is deterministic per `(account, day)`, so re-running the planner is
+safe and the output is testable; it changes tomorrow because the date seeds it.
+
+### Two corrections to conventional automation advice
+
+Both came from checking how LinkedIn actually behaves rather than what tools
+advertise, and both changed the design:
+
+1. **Invitations are capped on a rolling week (~100), and Premium does not
+   raise it.** The limiter originally modelled only hour/day windows, so an
+   account could sit under its daily cap every single day and still be
+   restricted by Friday. `AccountRateLimiter` now enforces a seven-day sliding
+   window. Vendor-quoted volumes around 800/month (~185/week) are roughly
+   double the standard allowance — that lives in the opt-in `aggressive` tier,
+   never as a default.
+
+2. **Acceptance rate restricts accounts more reliably than volume.** Below ~15%
+   acceptance, LinkedIn treats the account as spam however modest the volume,
+   and a meaningful share of restricted accounts never exceeded the published
+   limits. `src/outreach/health.py` measures real acceptance and converts it
+   into a throttle that scales caps down, stops invitations at the danger line,
+   and demotes the stage. It only ever reduces — nothing there can raise an
+   account above its stage and tier ceiling.
+
+### Sequences and the reply rule (`src/outreach/sequences.py`)
+
+```
+invite → (accepted) → welcome +2d → value +5d → ask +6d → [stop]
+                                       ↓ they reply
+                          sequence cancelled, human takes over
+                                       ↓
+                        qualify → book (scheduler link allowed here)
+```
+
+**A reply stops the sequence immediately and permanently**, cancelling anything
+already queued or awaiting review (`sync.py::_cancel_pending_for_target`). An
+automated follow-up landing after someone has answered is the clearest possible
+tell that they were talking to software, and it costs the meeting the sequence
+existed to book. `sync.py` pulls acceptances and replies back from LinkedIn to
+drive this, and is deliberately conservative — an ambiguous signal is treated
+as "they replied" rather than "carry on", because a false positive costs one
+unsent follow-up and a false negative costs the relationship.
+
+**Scheduler links are step-aware, not banned.** Blocked in every automated
+touch; allowed at the booking step once someone has replied and been qualified.
+The rule is about *when*, not about the link.
+
+### Preflight (`src/accounts/preflight.py`)
+
+Validates a live account using only read-only calls — `whoami`,
+`fetch_profile`, `fetch_inbox`, `fetch_activity`. If `whoami` succeeds the hard
+part is proven (headers, cookies, TLS and CSRF are all correct, because Voyager
+rejects the request outright otherwise); the rest tell you which features will
+work. Nothing is liked, connected, messaged or posted, so it is safe against a
+production account at any time. **This is the right first step after tying in a
+real account.**
 
 ---
 
@@ -355,7 +474,7 @@ implemented, so the UI polls.
 - **Agent runtime** is a separate process (`python main.py --agents ...`) not yet
   deployed; deploy it as a second Railway service with Redis attached to activate
   execution.
-- **Tests:** `pytest` (99 passing). CI-friendly, no external services —
+- **Tests:** `pytest` (150 passing). CI-friendly, no external services —
   in-memory SQLite, fakeredis, injected Clerk JWKS, and a recording transport
   (`tests/conftest.py`) that captures what *would* have been sent.
 
@@ -368,12 +487,15 @@ implemented, so the UI polls.
    is the only thing standing between the loop and real sends.
 2. **Bind the Playwright executor** as the fallback, so a drifted Voyager shape
    degrades to a slower send rather than a failure.
-3. **Deploy the agent runtime** and have `scheduler_agent` call
-   `execute.run_due` on a tick, so approved outreach fires on its paced schedule
-   instead of needing `POST /outreach/accounts/{id}/run`.
-4. **Detect invitation acceptance** (poll connections via `fetch_activity`/
-   inbox) to flip targets to `connected`, which is what unlocks the
-   connect → wait → follow-up-message sequence the engine already supports.
+3. **Deploy the agent runtime / a scheduled job** that, per account per day,
+   calls `warmup.service.today()` to get the activity plan and executes it,
+   then `outreach.sync.sync_account()` and `outreach.execute.run_due()`. Today
+   all three are available as API calls but nothing drives them on a tick, so
+   warm-up activity has to be triggered rather than just happening. **This is
+   the biggest remaining gap** — the programme is built but not yet autonomous.
+4. **Bind the warm-up planner to real content**: the planner says "do 9 likes
+   at these times"; it still needs a source of *which* posts to like and
+   comment on (ICP feed / target activity via `fetch_activity`).
 5. WebSocket server (`/ws/updates`) so the approval queue updates live instead
    of polling.
 6. Org-scope + auth the legacy campaign routes.

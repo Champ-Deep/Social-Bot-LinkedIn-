@@ -170,8 +170,39 @@ For the admin dashboard we'll extend this with `ACCOUNT_STATUS` and
   product's spine any more — campaign execution still doesn't run, and campaigns
   are not yet org-scoped. Don't build new surface area on them; the outreach
   loop replaces them.
+- **Warm-up is shipped and is the first screen that matters for a new account.**
+  `Warmup.tsx` shows the stage roadmap, what's still outstanding before the
+  account advances, the acceptance-rate health verdict, the funnel, and today's
+  planned activity. `POST /accounts/{id}/preflight` is wired to a "Test
+  connection" button — read-only, sends nothing, safe on a live account.
+- **Warm-up activity is planned but not yet autonomous.** The API returns
+  today's plan; nothing executes it on a tick yet. The UI should present the
+  plan as *scheduled intent*, not as completed work — `plan.completed_today`
+  carries what has actually been done.
 - **Not built yet:** settings (model slots, WhatsApp number), the smart inbox,
   and the content calendar — §7's remaining contracts.
+
+### Warm-up endpoints — BUILT
+```
+GET  /api/v1/warmup/program                    the stages + cadence (no auth)
+GET  /api/v1/warmup/accounts/{id}              stage, progress, blockers, health
+GET  /api/v1/warmup/accounts/{id}/today        stage + today's activity plan
+POST /api/v1/warmup/accounts/{id}/pause        {paused, reason}
+POST /api/v1/warmup/accounts/{id}/stage        {stage} -- may return a warning
+POST /api/v1/accounts/{id}/preflight           read-only live validation
+POST /api/v1/outreach/accounts/{id}/sync       pull acceptances + replies back
+POST /api/v1/outreach/targets/{id}/outcome     {outcome: interested|booked|not_interested}
+```
+
+UI notes for warm-up:
+- A locked action is **not** an error. "This account can't send invitations
+  yet" is the system working — present blockers as progress, not failure.
+- `health.verdict` of `danger` means invitations have stopped automatically.
+  Show `health.advice`, which explains it as a targeting problem rather than a
+  volume one, because that is what the user has to fix.
+- `POST .../stage` returns a `warning` when stages are skipped. Surface it —
+  skipping the ramp on a genuinely new account is the main way people get
+  their account restricted with this tool.
 
 ---
 
