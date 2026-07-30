@@ -89,6 +89,9 @@ class CompositeTransport:
     async def fetch_profile(self, account: Any, public_id: str) -> TransportResult:
         return await self._dispatch("fetch_profile", account, public_id)
 
+    async def fetch_connections(self, account: Any, since: Any = None) -> TransportResult:
+        return await self._dispatch("fetch_connections", account, since)
+
     async def whoami(self, account: Any) -> TransportResult:
         return await self._dispatch("whoami", account)
 

@@ -154,6 +154,7 @@ def check_copy(
     target: Any = None,
     *,
     min_score: int = 70,
+    allow_scheduler_link: bool = False,
 ) -> QualityReport:
     """
     Evaluate drafted copy for ``action`` aimed at ``target``.
@@ -161,6 +162,11 @@ def check_copy(
     ``target`` is duck-typed (``first_name``, ``full_name``, ``company``,
     ``title``, ``headline``) and used to verify the copy is actually about this
     person rather than about nobody in particular.
+
+    ``allow_scheduler_link`` is set only by the booking step of a sequence,
+    after the prospect has replied and been qualified. A calendar link in a
+    first touch is spam; the same link once someone has asked to talk is what
+    they wanted. The rule is about *when*, not about the link.
     """
     blockers: List[str] = []
     warnings: List[str] = []
@@ -195,24 +201,28 @@ def check_copy(
         blockers.append(f"Contains an unfilled placeholder: '{placeholder.group(0)}'")
 
     # --- Links ---
-    if _CALENDAR_PATTERN.search(body):
+    has_calendar = bool(_CALENDAR_PATTERN.search(body))
+    if has_calendar and not allow_scheduler_link:
         blockers.append("Contains a booking link — never in a first touch")
-    elif _LINK_PATTERN.search(body):
+    elif _LINK_PATTERN.search(body) and not (has_calendar and allow_scheduler_link):
         if action == "connect":
             blockers.append("Contains a link — connection notes with links get reported")
-        else:
+        elif not allow_scheduler_link:
             warnings.append("Contains a link in a first message")
             score -= 20
 
     # --- Hard CTAs ---
-    for phrase in _HARD_CTA:
-        if phrase in lowered:
-            if action == "connect":
-                blockers.append(f"Pitches in a connection request: '{phrase}'")
-            else:
-                warnings.append(f"Asks for time up front: '{phrase}'")
-                score -= 15
-            break
+    # Asking for time is the entire point of the booking step, so the CTA rules
+    # relax exactly where a scheduler link is permitted.
+    if not allow_scheduler_link:
+        for phrase in _HARD_CTA:
+            if phrase in lowered:
+                if action == "connect":
+                    blockers.append(f"Pitches in a connection request: '{phrase}'")
+                else:
+                    warnings.append(f"Asks for time up front: '{phrase}'")
+                    score -= 15
+                break
 
     # --- Tired template phrases ---
     tired = [p for p in _TIRED_PHRASES if p in lowered]

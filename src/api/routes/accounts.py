@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.accounts import service as accounts_service
 from src.accounts.crypto import EncryptionUnavailable
+from src.accounts.models import AccountStatus
 from src.accounts.schemas import (
     AccountConnect,
     AccountHealth,
@@ -125,6 +126,36 @@ async def verify_account(
     record = await _require(db, account_id, ctx.org_id)
     result = await accounts_service.check_health(db, record)
     return AccountHealth(**result)
+
+
+@router.post("/{account_id}/preflight")
+async def preflight(
+    account_id: str,
+    ctx: RequestContext = Depends(get_request_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Prove a live account works, using read-only calls only.
+
+    Runs whoami plus the profile/inbox/activity probes. Nothing is liked,
+    connected, messaged or posted — this is safe to run against a production
+    account at any time, and is the right first step after tying one in.
+    """
+    from src.accounts.preflight import run_preflight
+
+    record = await _require(db, account_id, ctx.org_id)
+    report = await run_preflight(record)
+
+    # A successful probe means the session is good; keep the stored status in
+    # step with what we just observed.
+    if report.ok and record.status != AccountStatus.ACTIVE:
+        record.status = AccountStatus.ACTIVE
+        await db.commit()
+    elif not report.ok:
+        record.status = AccountStatus.AUTH_REQUIRED
+        await db.commit()
+
+    return report.as_dict()
 
 
 @router.delete(

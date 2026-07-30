@@ -472,6 +472,36 @@ class MobileAPITransport:
             detail={"posts": _extract_activities(body)},
         )
 
+    async def fetch_connections(self, account: Any, since: Any = None) -> TransportResult:
+        """
+        List the account's connections.
+
+        Used to detect which invitations were accepted, which drives both the
+        follow-up sequence and the acceptance-rate governor. Returns a flat list
+        of member URNs rather than full profiles — the sync only needs identity.
+        """
+        status, body = await self._request(
+            account,
+            "GET",
+            "/relationships/connections?count=100&sortType=RECENTLY_ADDED",
+        )
+        if not self._ok(status):
+            raise TransportUnavailable(f"fetch_connections returned HTTP {status}")
+
+        urns = []
+        for element in (body or {}).get("elements", []) or []:
+            mini = element.get("miniProfile") or element.get("connectedMemberResolutionResult") or {}
+            urn = mini.get("entityUrn") or mini.get("publicIdentifier")
+            if urn:
+                urns.append(urn)
+
+        return TransportResult(
+            success=True,
+            action="fetch_connections",
+            via=self.name,
+            detail={"member_urns": urns, "count": len(urns)},
+        )
+
     async def fetch_inbox(self, account: Any, since: Any = None) -> TransportResult:
         """Fetch recent conversations."""
         path = "/messaging/conversations?keyVersion=LEGACY_INBOX"

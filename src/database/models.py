@@ -37,6 +37,9 @@ def import_all_models() -> None:
     from src.targeting import models as _targeting  # noqa: F401
     from src.outreach import models as _outreach  # noqa: F401
 
+    # Warm-up activity ledger (graduation, funnel, outcome attribution)
+    from src.warmup import models as _warmup  # noqa: F401
+
     # Registered as they are added:
     # from src.ingestion import models as _ingestion  # noqa: F401
     # from src.content import models as _content  # noqa: F401

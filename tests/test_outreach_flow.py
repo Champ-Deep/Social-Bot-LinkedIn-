@@ -22,7 +22,6 @@ from src.targeting.models import TargetStatus
 from src.targeting.schemas import TargetImportItem
 from src.targeting.service import import_targets
 
-pytestmark = pytest.mark.asyncio
 
 
 GOOD_FIT = TargetImportItem(
@@ -116,13 +115,13 @@ async def test_a_rejected_cookie_marks_the_account_auth_required(db, org):
 # ----------------------------------------------------------------------
 
 
-async def test_import_scores_targets_and_skips_duplicates(db, org, account, icp):
-    created, duplicates = await _import(db, org, account, icp, [GOOD_FIT, POOR_FIT])
+async def test_import_scores_targets_and_skips_duplicates(db, org, warm_account, icp):
+    created, duplicates = await _import(db, org, warm_account, icp, [GOOD_FIT, POOR_FIT])
     assert len(created) == 2
     assert duplicates == 0
 
     # Re-importing the same people must not create a second round of outreach.
-    _, duplicates = await _import(db, org, account, icp, [GOOD_FIT])
+    _, duplicates = await _import(db, org, warm_account, icp, [GOOD_FIT])
     assert duplicates == 1
 
     by_name = {t.full_name: t for t in created}
@@ -130,8 +129,8 @@ async def test_import_scores_targets_and_skips_duplicates(db, org, account, icp)
     assert by_name["Sam Taylor"].relevance_score < 60
 
 
-async def test_excluded_targets_are_marked_skipped_on_import(db, org, account, icp):
-    created, _ = await _import(db, org, account, icp, [EXCLUDED])
+async def test_excluded_targets_are_marked_skipped_on_import(db, org, warm_account, icp):
+    created, _ = await _import(db, org, warm_account, icp, [EXCLUDED])
     assert created[0].status == TargetStatus.SKIPPED
 
 
@@ -140,10 +139,10 @@ async def test_excluded_targets_are_marked_skipped_on_import(db, org, account, i
 # ----------------------------------------------------------------------
 
 
-async def test_only_good_fit_targets_become_suggestions(db, org, account, icp):
-    await _import(db, org, account, icp, [GOOD_FIT, POOR_FIT, EXCLUDED])
+async def test_only_good_fit_targets_become_suggestions(db, org, warm_account, icp):
+    await _import(db, org, warm_account, icp, [GOOD_FIT, POOR_FIT, EXCLUDED])
 
-    result = await engine.generate_suggestions(db, account, icp)
+    result = await engine.generate_suggestions(db, warm_account, icp)
 
     assert len(result["created"]) == 1
     suggestion = result["created"][0]
@@ -154,11 +153,11 @@ async def test_only_good_fit_targets_become_suggestions(db, org, account, icp):
     assert result["skipped"]["excluded_by_icp"] == 1
 
 
-async def test_generated_copy_passes_the_quality_gate(db, org, account, icp):
+async def test_generated_copy_passes_the_quality_gate(db, org, warm_account, icp):
     """With no OpenRouter key configured this exercises the template fallback,
     which must still produce copy good enough to send."""
-    await _import(db, org, account, icp, [GOOD_FIT])
-    result = await engine.generate_suggestions(db, account, icp)
+    await _import(db, org, warm_account, icp, [GOOD_FIT])
+    result = await engine.generate_suggestions(db, warm_account, icp)
 
     suggestion = result["created"][0]
     assert suggestion.status == SuggestionStatus.PENDING
@@ -168,29 +167,29 @@ async def test_generated_copy_passes_the_quality_gate(db, org, account, icp):
     assert suggestion.rationale
 
 
-async def test_suggestions_explain_why_this_person(db, org, account, icp):
-    await _import(db, org, account, icp, [GOOD_FIT])
-    result = await engine.generate_suggestions(db, account, icp)
+async def test_suggestions_explain_why_this_person(db, org, warm_account, icp):
+    await _import(db, org, warm_account, icp, [GOOD_FIT])
+    result = await engine.generate_suggestions(db, warm_account, icp)
 
     suggestion = result["created"][0]
     assert suggestion.relevance_reasons
     assert any("Title matches" in r for r in suggestion.relevance_reasons)
 
 
-async def test_the_same_person_is_never_suggested_twice(db, org, account, icp):
-    await _import(db, org, account, icp, [GOOD_FIT])
+async def test_the_same_person_is_never_suggested_twice(db, org, warm_account, icp):
+    await _import(db, org, warm_account, icp, [GOOD_FIT])
 
-    first = await engine.generate_suggestions(db, account, icp)
-    second = await engine.generate_suggestions(db, account, icp)
+    first = await engine.generate_suggestions(db, warm_account, icp)
+    second = await engine.generate_suggestions(db, warm_account, icp)
 
     assert len(first["created"]) == 1
     assert len(second["created"]) == 0
     assert second["skipped"]["already_suggested"] == 1
 
 
-async def test_daily_suggestion_budget_caps_the_review_queue(db, org, account, icp):
+async def test_daily_suggestion_budget_caps_the_review_queue(db, org, warm_account, icp):
     """Approval fatigue is a real failure mode: the queue stays reviewable."""
-    account.daily_caps = {**(account.daily_caps or {}), "suggestion_budget": 2}
+    warm_account.daily_caps = {**(warm_account.daily_caps or {}), "suggestion_budget": 2}
     await db.commit()
 
     many = [
@@ -204,9 +203,9 @@ async def test_daily_suggestion_budget_caps_the_review_queue(db, org, account, i
         )
         for i in range(6)
     ]
-    await _import(db, org, account, icp, many)
+    await _import(db, org, warm_account, icp, many)
 
-    result = await engine.generate_suggestions(db, account, icp)
+    result = await engine.generate_suggestions(db, warm_account, icp)
     assert len(result["created"]) == 2
     assert result["skipped"]["daily_suggestion_budget"] >= 1
 
@@ -219,17 +218,17 @@ async def test_no_icp_means_no_suggestions(db, org, account):
 
 
 async def test_capacity_is_read_from_the_live_rate_limiter(
-    db, org, account, icp, rate_limiter
+    db, org, warm_account, icp, rate_limiter
 ):
     """Invitations already sent today reduce how many we suggest."""
-    caps = caps_policy.caps_for(account, "connect")
+    caps = caps_policy.caps_for(warm_account, "connect")
     for _ in range(caps.per_day):
         await rate_limiter.check_and_consume(
-            str(account.id), "connect", per_hour=999, per_day=999, cooldown_seconds=0
+            str(warm_account.id), "connect", per_hour=999, per_day=999, cooldown_seconds=0
         )
 
-    await _import(db, org, account, icp, [GOOD_FIT])
-    result = await engine.generate_suggestions(db, account, icp, rate_limiter=rate_limiter)
+    await _import(db, org, warm_account, icp, [GOOD_FIT])
+    result = await engine.generate_suggestions(db, warm_account, icp, rate_limiter=rate_limiter)
 
     assert result["created"] == []
     assert result["skipped"]["no_connect_capacity_today"] == 1
@@ -240,15 +239,15 @@ async def test_capacity_is_read_from_the_live_rate_limiter(
 # ----------------------------------------------------------------------
 
 
-async def _one_suggestion(db, org, account, icp, item=GOOD_FIT):
-    await _import(db, org, account, icp, [item])
-    result = await engine.generate_suggestions(db, account, icp)
+async def _one_suggestion(db, org, warm_account, icp, item=GOOD_FIT):
+    await _import(db, org, warm_account, icp, [item])
+    result = await engine.generate_suggestions(db, warm_account, icp)
     return result["created"][0]
 
 
-async def test_approving_schedules_the_send_with_pacing(db, org, account, icp):
-    suggestion = await _one_suggestion(db, org, account, icp)
-    approved = await executor.approve(db, suggestion, account=account)
+async def test_approving_schedules_the_send_with_pacing(db, org, warm_account, icp):
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    approved = await executor.approve(db, suggestion, account=warm_account)
 
     assert approved.status == SuggestionStatus.SCHEDULED
     assert approved.scheduled_for is not None
@@ -256,27 +255,27 @@ async def test_approving_schedules_the_send_with_pacing(db, org, account, icp):
     assert approved.reviewed_at is not None
 
 
-async def test_a_user_edit_is_re_checked_by_the_quality_gate(db, org, account, icp):
+async def test_a_user_edit_is_re_checked_by_the_quality_gate(db, org, warm_account, icp):
     """Human approval supplies intent, not an exemption from the safety rules."""
-    suggestion = await _one_suggestion(db, org, account, icp)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
 
     with pytest.raises(executor.ExecutionBlocked) as exc:
         await executor.approve(
             db,
             suggestion,
-            account=account,
+            account=warm_account,
             edited_text="Hi Dana, book a call with me here: calendly.com/me",
         )
     assert "booking link" in str(exc.value).lower()
     assert suggestion.status == SuggestionStatus.BLOCKED
 
 
-async def test_a_good_edit_is_accepted(db, org, account, icp):
-    suggestion = await _one_suggestion(db, org, account, icp)
+async def test_a_good_edit_is_accepted(db, org, warm_account, icp):
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
     approved = await executor.approve(
         db,
         suggestion,
-        account=account,
+        account=warm_account,
         edited_text=(
             "Hi Dana — the activation work you're doing at Northwind is exactly "
             "the problem I spend my time on. Would be glad to connect."
@@ -287,15 +286,15 @@ async def test_a_good_edit_is_accepted(db, org, account, icp):
 
 
 async def test_rejecting_with_suppression_blocks_all_future_contact(
-    db, org, account, icp
+    db, org, warm_account, icp
 ):
-    suggestion = await _one_suggestion(db, org, account, icp)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
     await executor.reject(db, suggestion, suppress_target=True)
 
     assert suggestion.status == SuggestionStatus.REJECTED
 
     # The person is now out of reach of every future generation run.
-    again = await engine.generate_suggestions(db, account, icp)
+    again = await engine.generate_suggestions(db, warm_account, icp)
     assert again["created"] == []
 
 
@@ -305,17 +304,17 @@ async def test_rejecting_with_suppression_blocks_all_future_contact(
 
 
 async def test_approved_suggestion_sends_via_the_transport(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
-    suggestion = await _one_suggestion(db, org, account, icp)
-    await executor.approve(db, suggestion, account=account)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    await executor.approve(db, suggestion, account=warm_account)
 
     sent = await executor.execute_suggestion(
         db,
         suggestion,
         transport=transport,
         rate_limiter=rate_limiter,
-        account=account,
+        account=warm_account,
         force=True,
     )
 
@@ -328,37 +327,37 @@ async def test_approved_suggestion_sends_via_the_transport(
 
 
 async def test_sending_consumes_the_global_cap(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
-    suggestion = await _one_suggestion(db, org, account, icp)
-    await executor.approve(db, suggestion, account=account)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    await executor.approve(db, suggestion, account=warm_account)
     await executor.execute_suggestion(
         db, suggestion, transport=transport, rate_limiter=rate_limiter,
-        account=account, force=True,
+        account=warm_account, force=True,
     )
 
-    usage = await rate_limiter.usage(str(account.id), "connect")
+    usage = await rate_limiter.usage(str(warm_account.id), "connect")
     assert usage["day_used"] == 1
 
 
 async def test_the_daily_cap_is_enforced_at_send_time(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
     """Even an approved action is refused once the account is out of allowance."""
-    caps = caps_policy.caps_for(account, "connect")
+    caps = caps_policy.caps_for(warm_account, "connect")
     for _ in range(caps.per_day):
         await rate_limiter.check_and_consume(
-            str(account.id), "connect", per_hour=999, per_day=caps.per_day,
+            str(warm_account.id), "connect", per_hour=999, per_day=caps.per_day,
             cooldown_seconds=0,
         )
 
-    suggestion = await _one_suggestion(db, org, account, icp)
-    await executor.approve(db, suggestion, account=account)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    await executor.approve(db, suggestion, account=warm_account)
 
     with pytest.raises(executor.ExecutionBlocked) as exc:
         await executor.execute_suggestion(
             db, suggestion, transport=transport, rate_limiter=rate_limiter,
-            account=account, force=True,
+            account=warm_account, force=True,
         )
 
     assert "rate limited" in str(exc.value)
@@ -367,36 +366,36 @@ async def test_the_daily_cap_is_enforced_at_send_time(
 
 
 async def test_an_unapproved_suggestion_can_never_be_sent(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
     """The core safety property: no approval, no send."""
-    suggestion = await _one_suggestion(db, org, account, icp)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
     assert suggestion.status == SuggestionStatus.PENDING
 
     with pytest.raises(executor.ExecutionBlocked) as exc:
         await executor.execute_suggestion(
             db, suggestion, transport=transport, rate_limiter=rate_limiter,
-            account=account, force=True,
+            account=warm_account, force=True,
         )
     assert "not approved" in str(exc.value)
 
 
 async def test_outside_active_hours_the_send_is_rescheduled_not_dropped(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
     # A window that cannot contain "now".
     now_hour = datetime.now(timezone.utc).hour
     closed = ((now_hour + 2) % 24, (now_hour + 3) % 24)
-    account.daily_caps = {**(account.daily_caps or {}), "active_hours": list(closed)}
+    warm_account.daily_caps = {**(warm_account.daily_caps or {}), "active_hours": list(closed)}
     await db.commit()
 
-    suggestion = await _one_suggestion(db, org, account, icp)
-    await executor.approve(db, suggestion, account=account)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    await executor.approve(db, suggestion, account=warm_account)
 
     with pytest.raises(executor.ExecutionBlocked) as exc:
         await executor.execute_suggestion(
             db, suggestion, transport=transport, rate_limiter=rate_limiter,
-            account=account, force=True,
+            account=warm_account, force=True,
         )
 
     assert "active hours" in str(exc.value)
@@ -404,39 +403,39 @@ async def test_outside_active_hours_the_send_is_rescheduled_not_dropped(
     assert suggestion.status != SuggestionStatus.FAILED
 
 
-async def test_a_challenge_pauses_the_account(db, org, account, icp, rate_limiter):
+async def test_a_challenge_pauses_the_account(db, org, warm_account, icp, rate_limiter):
     """A verification wall must stop the account, not retry into a restriction."""
     from src.infrastructure.transports.base import TransportChallenge
     from tests.conftest import RecordingTransport
 
     challenged = RecordingTransport(raise_with=TransportChallenge("checkpoint"))
 
-    suggestion = await _one_suggestion(db, org, account, icp)
-    await executor.approve(db, suggestion, account=account)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    await executor.approve(db, suggestion, account=warm_account)
 
     with pytest.raises(executor.ExecutionBlocked):
         await executor.execute_suggestion(
             db, suggestion, transport=challenged, rate_limiter=rate_limiter,
-            account=account, force=True,
+            account=warm_account, force=True,
         )
 
-    assert account.status == "rate_limited"
+    assert warm_account.status == "rate_limited"
     assert suggestion.status == SuggestionStatus.FAILED
 
 
 async def test_run_due_only_sends_what_is_actually_due(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
-    suggestion = await _one_suggestion(db, org, account, icp)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
     await executor.approve(
         db,
         suggestion,
-        account=account,
+        account=warm_account,
         send_at=datetime.now(timezone.utc) + timedelta(hours=6),
     )
 
     result = await executor.run_due(
-        db, account, transport=transport, rate_limiter=rate_limiter
+        db, warm_account, transport=transport, rate_limiter=rate_limiter
     )
     assert result["sent"] == []
 
@@ -445,19 +444,19 @@ async def test_run_due_only_sends_what_is_actually_due(
     await db.commit()
 
     result = await executor.run_due(
-        db, account, transport=transport, rate_limiter=rate_limiter
+        db, warm_account, transport=transport, rate_limiter=rate_limiter
     )
     assert result["sent"] == [str(suggestion.id)]
 
 
 async def test_a_sent_connection_marks_the_target_contacted(
-    db, org, account, icp, transport, rate_limiter
+    db, org, warm_account, icp, transport, rate_limiter
 ):
-    suggestion = await _one_suggestion(db, org, account, icp)
-    await executor.approve(db, suggestion, account=account)
+    suggestion = await _one_suggestion(db, org, warm_account, icp)
+    await executor.approve(db, suggestion, account=warm_account)
     await executor.execute_suggestion(
         db, suggestion, transport=transport, rate_limiter=rate_limiter,
-        account=account, force=True,
+        account=warm_account, force=True,
     )
 
     from sqlalchemy import select

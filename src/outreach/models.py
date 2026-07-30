@@ -40,6 +40,7 @@ class SuggestionStatus:
     REJECTED = "rejected"      # user said no
     EXPIRED = "expired"        # sat unreviewed too long to still be timely
     BLOCKED = "blocked"        # a safety gate refused it
+    CANCELLED = "cancelled"    # withdrawn because the prospect replied
 
 
 class OutreachSuggestion(Base):
@@ -88,6 +89,11 @@ class OutreachSuggestion(Base):
     # comment/like), and how the copy was produced (model or template).
     subject_urn: Mapped[Optional[str]] = mapped_column(String(255))
     generated_by: Mapped[Optional[str]] = mapped_column(String(128))
+
+    # Which cadence step produced this, and which copy variant was used --
+    # together these let outcomes be attributed back to what was actually tried.
+    step: Mapped[Optional[str]] = mapped_column(String(32))
+    variant: Mapped[Optional[str]] = mapped_column(String(64))
 
     # Sequencing: a follow-up message that must wait for an invitation to be
     # accepted points at the suggestion that created the invitation.

@@ -348,6 +348,13 @@ export interface AccountStats {
   connects_sent: number;
   messages_sent: number;
   remaining_today: Record<string, number>;
+  warmup_stage?: string;
+  warmup_stage_name?: string;
+  warmup_paused: boolean;
+  health_verdict: 'healthy' | 'caution' | 'danger' | 'unknown';
+  health_headline: string;
+  throttle: number;
+  funnel: Partial<Funnel>;
 }
 
 export interface Dashboard {
@@ -361,4 +368,121 @@ export interface ScorePreview {
   excluded: boolean;
   exclusion_reason?: string;
   passes_floor: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Warm-up programme
+// ---------------------------------------------------------------------------
+
+export type WarmupStageKey =
+  | 'observe'
+  | 'react'
+  | 'converse'
+  | 'publish'
+  | 'connect'
+  | 'full';
+
+export type HealthVerdict = 'healthy' | 'caution' | 'danger' | 'unknown';
+
+export interface WarmupStageSpec {
+  key: WarmupStageKey;
+  name: string;
+  intent: string;
+  min_days: number;
+  allowed: string[];
+  daily: Record<string, { low: number; high: number; probability: number }>;
+  requires: Record<string, number>;
+  min_acceptance_rate: number | null;
+}
+
+export interface SequenceStepSpec {
+  key: string;
+  action: string;
+  wait_days: number;
+  objective: string;
+  requires_status: string[];
+  manual_only: boolean;
+  allow_scheduler_link: boolean;
+}
+
+export interface WarmupProgram {
+  stages: WarmupStageSpec[];
+  minimum_days_to_outreach: number;
+  sequence: SequenceStepSpec[];
+  acceptance_thresholds: { caution_below: number; danger_below: number };
+  principles: string[];
+}
+
+export interface Funnel {
+  invites_sent: number;
+  invites_accepted: number;
+  messages_sent: number;
+  replies: number;
+  interested: number;
+  booked: number;
+  acceptance_rate: number | null;
+  reply_rate: number | null;
+  booking_rate: number | null;
+}
+
+export interface AccountHealthReport {
+  verdict: HealthVerdict;
+  throttle: number;
+  suspended_actions: string[];
+  headline: string;
+  advice: string[];
+  had_challenge: boolean;
+  funnel: Funnel;
+}
+
+export interface WarmupStatus {
+  account_id: string;
+  stage: WarmupStageKey;
+  stage_name: string;
+  intent: string;
+  days_in_stage: number;
+  min_days: number;
+  allowed_actions: string[];
+  totals: Record<string, number>;
+  changed: { from: string; to: string; direction: string } | null;
+  ready_to_advance: boolean;
+  next_stage: string | null;
+  progress: string[];
+  blockers: string[];
+  paused: boolean;
+  health: AccountHealthReport;
+}
+
+export interface PlannedAction {
+  action: string;
+  at: string;
+  reason: string;
+}
+
+export interface WarmupToday extends WarmupStatus {
+  plan: {
+    day?: string;
+    actions: PlannedAction[];
+    counts: Record<string, number>;
+    completed_today?: Record<string, number>;
+    notes: string[];
+  };
+}
+
+export interface PreflightCheck {
+  name: string;
+  label: string;
+  ok: boolean;
+  critical: boolean;
+  detail: Record<string, unknown> | null;
+  error: string | null;
+  impact: string;
+}
+
+export interface PreflightReport {
+  ok: boolean;
+  identity: Record<string, string>;
+  summary: string;
+  next_steps: string[];
+  checks: PreflightCheck[];
 }

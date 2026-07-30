@@ -20,16 +20,36 @@ from src.database.models import Base
 
 
 class TargetStatus:
-    """Lifecycle of a prospect for one account."""
+    """
+    Lifecycle of a prospect for one account.
+
+    The order matters: everything from CONNECTED onward implies the invitation
+    was accepted, and everything from REPLIED onward implies they wrote back.
+    The funnel and the acceptance governor both rely on that being true.
+    """
     NEW = "new"                 # imported, not yet evaluated
     SCORED = "scored"           # relevance computed
     SUGGESTED = "suggested"     # a suggestion exists awaiting the user
     APPROVED = "approved"       # user approved an action toward them
-    CONTACTED = "contacted"     # an action was actually sent
+    CONTACTED = "contacted"     # an invitation/message was actually sent
     CONNECTED = "connected"     # invitation accepted
-    REPLIED = "replied"         # they responded
+    REPLIED = "replied"         # they wrote back -- sequence pauses here
+    INTERESTED = "interested"   # qualified as a real opportunity
+    BOOKED = "booked"           # meeting on the calendar
+    NOT_INTERESTED = "not_interested"
     SKIPPED = "skipped"         # below the relevance floor / excluded
     SUPPRESSED = "suppressed"   # never contact (user decision or opt-out)
+
+
+# Once a target reaches one of these, automation stops touching them: a human
+# is in the conversation, and the worst thing the system can do is talk over it.
+HUMAN_OWNED = (
+    TargetStatus.REPLIED,
+    TargetStatus.INTERESTED,
+    TargetStatus.BOOKED,
+    TargetStatus.NOT_INTERESTED,
+    TargetStatus.SUPPRESSED,
+)
 
 
 class ICPProfile(Base):
@@ -120,6 +140,16 @@ class OutreachTarget(Base):
 
     status: Mapped[str] = mapped_column(String(32), default=TargetStatus.NEW, index=True)
     last_touched_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Funnel timestamps. Kept explicitly rather than inferred from status so
+    # the acceptance and reply rates survive later status changes.
+    invited_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    replied_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    booked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Which copy/angle variant was used on this person, for outcome attribution.
+    variant: Mapped[Optional[str]] = mapped_column(String(64))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

@@ -72,6 +72,9 @@ async def generate_suggestions(
     surface. "We looked at 40 people and are suggesting 6" is far more useful
     than silently surfacing 6.
     """
+    from src.outreach import health as health_module
+    from src.warmup import service as warmup_service
+
     icp = icp or await _active_icp(db, account)
     if icp is None:
         return {
@@ -79,6 +82,22 @@ async def generate_suggestions(
             "considered": 0,
             "skipped": {"no_icp": 1},
             "message": "No ICP is configured for this account, so there is nobody to target.",
+        }
+
+    # Warm-up gate. An account that hasn't earned outreach yet doesn't get a
+    # queue at all -- there is no point asking a human to approve invitations
+    # the account is not permitted to send.
+    report = await health_module.account_health(db, account)
+    allowed, reason = warmup_service.can_perform(account, SuggestionAction.CONNECT, report)
+    message_allowed, _ = warmup_service.can_perform(
+        account, SuggestionAction.MESSAGE, report
+    )
+    if not allowed and not message_allowed:
+        return {
+            "created": [],
+            "considered": 0,
+            "skipped": {"warmup": 1},
+            "message": reason,
         }
 
     budget = await _remaining_budget(db, account)
@@ -96,10 +115,23 @@ async def generate_suggestions(
     skipped: dict = {}
     scored: List[tuple] = []
 
+    permitted = {
+        action
+        for action in (
+            SuggestionAction.CONNECT,
+            SuggestionAction.MESSAGE,
+            SuggestionAction.COMMENT,
+        )
+        if warmup_service.can_perform(account, action, report)[0]
+    }
+
     for target in targets:
         action = _action_for(account, target)
         if action is None:
             _bump(skipped, "no_applicable_action")
+            continue
+        if action not in permitted:
+            _bump(skipped, f"{action}_not_unlocked_yet")
             continue
 
         result = score_target(target, icp)
@@ -121,8 +153,11 @@ async def generate_suggestions(
     # Best fit first: if capacity is limited, spend it on the strongest matches.
     scored.sort(key=lambda row: row[0], reverse=True)
 
-    # How many of each action the account may still send today.
-    capacity = await _remaining_capacity(account, {a for _, a, _ in scored}, rate_limiter)
+    # How many of each action the account may still send today, at the volume
+    # its measured health allows.
+    capacity = await _remaining_capacity(
+        account, {a for _, a, _ in scored}, rate_limiter, throttle=report.throttle
+    )
 
     created: List[OutreachSuggestion] = []
     for score, action, target in scored:
@@ -299,7 +334,7 @@ async def _remaining_budget(db: AsyncSession, account: Any) -> int:
 
 
 async def _remaining_capacity(
-    account: Any, actions: set, rate_limiter: Any = None
+    account: Any, actions: set, rate_limiter: Any = None, throttle: float = 1.0
 ) -> dict:
     """
     How many of each action this account may still send today.
@@ -308,18 +343,27 @@ async def _remaining_capacity(
     what has already gone out; falls back to the configured daily cap when it
     isn't (which only ever over-estimates the queue, never the sending — the
     executor checks the real limiter again before every send).
+
+    The weekly window is checked alongside the daily one: invitations are
+    capped weekly by LinkedIn, so an account can have daily headroom and no
+    weekly headroom at all.
     """
     capacity = {}
     for action in actions:
-        caps = caps_policy.caps_for(account, action)
-        used = 0
+        caps = caps_policy.caps_for(account, action, throttle=throttle)
+        day_used = week_used = 0
         if rate_limiter is not None:
             try:
                 usage = await rate_limiter.usage(str(account.id), action)
-                used = int(usage.get("day_used", 0))
+                day_used = int(usage.get("day_used", 0))
+                week_used = int(usage.get("week_used", 0))
             except Exception as exc:  # a limiter hiccup must not block review
                 logger.warning("Rate usage lookup failed for %s: %s", action, exc)
-        capacity[action] = max(0, caps.per_day - used)
+
+        remaining = max(0, caps.per_day - day_used)
+        if caps.per_week:
+            remaining = min(remaining, max(0, caps.per_week - week_used))
+        capacity[action] = remaining
     return capacity
 
 

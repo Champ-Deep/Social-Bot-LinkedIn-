@@ -135,6 +135,16 @@ class AccountStats(BaseModel):
     messages_sent: int = 0
     remaining_today: dict = Field(default_factory=dict)
 
+    # Where this account is in the warm-up programme, and what its measured
+    # outcomes say about whether it is safe to keep going.
+    warmup_stage: Optional[str] = None
+    warmup_stage_name: Optional[str] = None
+    warmup_paused: bool = False
+    health_verdict: str = "unknown"
+    health_headline: str = ""
+    throttle: float = 1.0
+    funnel: dict = Field(default_factory=dict)
+
 
 class DashboardResponse(BaseModel):
     """Every account in the org at a glance."""

@@ -25,6 +25,11 @@ from typing import Callable, Optional
 
 HOUR_SECONDS = 3600
 DAY_SECONDS = 86400
+# LinkedIn enforces invitations on a *rolling week*, not a calendar week: the
+# allowance frees up seven days after each invitation was sent. Modelling this
+# as a sliding window is the only way to respect the limit that actually gets
+# accounts restricted.
+WEEK_SECONDS = 604800
 
 
 @dataclass(frozen=True)
@@ -34,6 +39,7 @@ class RateDecision:
     reason: str = ""
     hour_used: int = 0
     day_used: int = 0
+    week_used: int = 0
     retry_after_seconds: int = 0
 
     def __bool__(self) -> bool:  # allow `if decision:`
@@ -70,64 +76,73 @@ class AccountRateLimiter:
         per_hour: int,
         per_day: int,
         cooldown_seconds: int = 0,
+        per_week: int = 0,
     ) -> RateDecision:
         """
         Check the caps and, if allowed, atomically consume one slot.
 
         Returns a :class:`RateDecision`. When ``allowed`` is False no slot is
         consumed and ``retry_after_seconds`` is a best-effort hint.
+
+        ``per_week`` matters most for invitations: LinkedIn's real invitation
+        limit is weekly, so an account can sit comfortably under its daily cap
+        every day and still be restricted by Friday.
         """
         now = int(self._clock())
         key = self._key(account_id, action)
         hour_start = now - HOUR_SECONDS
         day_start = now - DAY_SECONDS
+        week_start = now - WEEK_SECONDS
 
-        # Trim anything older than a day, then read current usage + newest ts.
+        # Retain a full week so the weekly window can be evaluated, then read
+        # usage across all three windows plus the newest timestamp.
         trim_pipe = self.redis.pipeline()
-        trim_pipe.zremrangebyscore(key, 0, day_start)
+        trim_pipe.zremrangebyscore(key, 0, week_start)
         trim_pipe.zcount(key, hour_start, now)          # hourly usage
-        trim_pipe.zcard(key)                            # daily usage (post-trim)
+        trim_pipe.zcount(key, day_start, now)           # daily usage
+        trim_pipe.zcard(key)                            # weekly usage (post-trim)
         trim_pipe.zrange(key, -1, -1, withscores=True)  # newest entry
-        _, hour_used, day_used, newest = await trim_pipe.execute()
+        _, hour_used, day_used, week_used, newest = await trim_pipe.execute()
+
+        def decision(reason: str, retry_after: int) -> RateDecision:
+            return RateDecision(
+                allowed=False,
+                reason=reason,
+                hour_used=hour_used,
+                day_used=day_used,
+                week_used=week_used,
+                retry_after_seconds=retry_after,
+            )
 
         # Cooldown: seconds since the most recent allowed action.
         if cooldown_seconds and newest:
             last_ts = int(newest[0][1])
             elapsed = now - last_ts
             if elapsed < cooldown_seconds:
-                return RateDecision(
-                    allowed=False,
-                    reason="cooldown",
-                    hour_used=hour_used,
-                    day_used=day_used,
-                    retry_after_seconds=cooldown_seconds - elapsed,
-                )
+                return decision("cooldown", cooldown_seconds - elapsed)
+
+        if per_week and week_used >= per_week:
+            # Retry when the oldest entry in the window ages out, not in a
+            # flat week -- a rolling window frees up continuously.
+            oldest = await self.redis.zrange(key, 0, 0, withscores=True)
+            retry = WEEK_SECONDS
+            if oldest:
+                retry = max(60, int(oldest[0][1]) + WEEK_SECONDS - now)
+            return decision("weekly_cap", retry)
 
         if per_day and day_used >= per_day:
-            return RateDecision(
-                allowed=False,
-                reason="daily_cap",
-                hour_used=hour_used,
-                day_used=day_used,
-                retry_after_seconds=DAY_SECONDS,
-            )
+            return decision("daily_cap", DAY_SECONDS)
 
         if per_hour and hour_used >= per_hour:
-            return RateDecision(
-                allowed=False,
-                reason="hourly_cap",
-                hour_used=hour_used,
-                day_used=day_used,
-                retry_after_seconds=HOUR_SECONDS,
-            )
+            return decision("hourly_cap", HOUR_SECONDS)
 
         # Allowed -> consume one slot. Member must be unique; use a monotonic
         # suffix so two actions in the same second don't collapse to one entry.
         member = f"{now}:{await self.redis.incr(f'{key}:seq')}"
         consume_pipe = self.redis.pipeline()
         consume_pipe.zadd(key, {member: now})
-        consume_pipe.expire(key, DAY_SECONDS)
-        consume_pipe.expire(f"{key}:seq", DAY_SECONDS)
+        consume_pipe.expire(key, WEEK_SECONDS)
+        consume_pipe.expire(f"{key}:seq", WEEK_SECONDS)
         await consume_pipe.execute()
 
         return RateDecision(
@@ -135,14 +150,16 @@ class AccountRateLimiter:
             reason="ok",
             hour_used=hour_used + 1,
             day_used=day_used + 1,
+            week_used=week_used + 1,
         )
 
     async def usage(self, account_id: str, action: str) -> dict:
-        """Read current hourly/daily usage without consuming a slot."""
+        """Read current hourly/daily/weekly usage without consuming a slot."""
         now = int(self._clock())
         key = self._key(account_id, action)
         pipe = self.redis.pipeline()
         pipe.zcount(key, now - HOUR_SECONDS, now)
         pipe.zcount(key, now - DAY_SECONDS, now)
-        hour_used, day_used = await pipe.execute()
-        return {"hour_used": hour_used, "day_used": day_used}
+        pipe.zcount(key, now - WEEK_SECONDS, now)
+        hour_used, day_used, week_used = await pipe.execute()
+        return {"hour_used": hour_used, "day_used": day_used, "week_used": week_used}

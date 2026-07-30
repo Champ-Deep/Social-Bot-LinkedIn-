@@ -14,7 +14,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import accounts, agents, campaigns, me, outreach, targeting
+from src.api.routes import (
+    accounts,
+    agents,
+    campaigns,
+    me,
+    outreach,
+    targeting,
+    warmup,
+)
 
 API_V1_PREFIX = "/api/v1"
 
@@ -95,6 +103,7 @@ app.include_router(agents.router, prefix=API_V1_PREFIX)
 app.include_router(accounts.router, prefix=API_V1_PREFIX)
 app.include_router(targeting.router, prefix=API_V1_PREFIX)
 app.include_router(outreach.router, prefix=API_V1_PREFIX)
+app.include_router(warmup.router, prefix=API_V1_PREFIX)
 
 
 @app.get("/healthz", tags=["system"])

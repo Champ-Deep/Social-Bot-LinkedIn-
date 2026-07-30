@@ -19,8 +19,12 @@ import type {
   PaginatedResponse,
   ScorePreview,
   Suggestion,
+  PreflightReport,
   Target,
   TargetImportItem,
+  WarmupProgram,
+  WarmupStatus,
+  WarmupToday,
 } from '@/types';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api/v1';
@@ -302,3 +306,50 @@ export const outreachApi = {
     return data as Dashboard;
   },
 };
+
+export const warmupApi = {
+  async program(): Promise<WarmupProgram> {
+    const { data } = await http.get('/warmup/program');
+    return data as WarmupProgram;
+  },
+
+  async status(accountId: string): Promise<WarmupStatus> {
+    const { data } = await http.get(`/warmup/accounts/${accountId}`);
+    return data as WarmupStatus;
+  },
+
+  async today(accountId: string): Promise<WarmupToday> {
+    const { data } = await http.get(`/warmup/accounts/${accountId}/today`);
+    return data as WarmupToday;
+  },
+
+  async pause(accountId: string, paused: boolean, reason = ''): Promise<void> {
+    await http.post(`/warmup/accounts/${accountId}/pause`, { paused, reason });
+  },
+
+  async setStage(accountId: string, stage: string): Promise<{ warning?: string }> {
+    const { data } = await http.post(`/warmup/accounts/${accountId}/stage`, { stage });
+    return data;
+  },
+};
+
+// Read-only validation of a live account. Sends nothing.
+export async function preflight(accountId: string): Promise<PreflightReport> {
+  const { data } = await http.post(`/accounts/${accountId}/preflight`);
+  return data as PreflightReport;
+}
+
+export async function syncAccount(
+  accountId: string,
+): Promise<{ accepted: number; replied: number; errors: string[] }> {
+  const { data } = await http.post(`/outreach/accounts/${accountId}/sync`);
+  return data;
+}
+
+export async function recordOutcome(
+  targetId: string,
+  outcome: 'interested' | 'booked' | 'not_interested',
+): Promise<{ status: string }> {
+  const { data } = await http.post(`/outreach/targets/${targetId}/outcome`, { outcome });
+  return data;
+}

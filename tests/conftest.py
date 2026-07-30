@@ -179,6 +179,24 @@ async def account(db, org, transport):
 
 
 @pytest_asyncio.fixture
+async def warm_account(db, account):
+    """
+    An account that has completed warm-up and may perform outreach.
+
+    Most outreach tests want to exercise the sending path, not the ramp — so
+    they use this. The ramp itself is tested directly in ``test_warmup.py``,
+    and ``test_outreach_flow`` keeps explicit tests proving a *fresh* account
+    is refused.
+    """
+    from src.warmup import planner, program
+
+    planner.set_stage(account, program.FINAL_STAGE)
+    await db.commit()
+    await db.refresh(account)
+    return account
+
+
+@pytest_asyncio.fixture
 async def icp(db, org):
     """An ICP targeting growth leaders at SaaS companies."""
     from src.targeting.schemas import ICPCreate

@@ -137,10 +137,18 @@ async def connect_account(
     record.device_fingerprint = generate_fingerprint(str(record.id))
     record.proxy = {"url": payload.proxy_url} if payload.proxy_url else None
 
-    caps = caps_policy.default_caps_payload(warmup=True)
+    caps = caps_policy.default_caps_payload()
     if payload.timezone:
         caps["timezone"] = payload.timezone
     record.daily_caps = caps
+
+    # Every new account enters the warm-up programme at the first stage. This
+    # is not configurable at connect time on purpose: an account that starts
+    # sending on day one is the single most restrictable thing in the system.
+    from src.warmup import planner as warmup_planner
+    from src.warmup import program as warmup_program
+
+    warmup_planner.set_stage(record, warmup_program.FIRST_STAGE)
 
     db.add(record)
     await db.flush()

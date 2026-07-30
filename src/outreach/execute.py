@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.accounts import caps as caps_policy
 from src.accounts.service import LiveAccount, load_live_account
 from src.infrastructure.transports.base import TransportChallenge, TransportError
-from src.outreach import pacing
+from src.outreach import pacing, sequences
 from src.outreach.models import OutreachSuggestion, SuggestionAction, SuggestionStatus
 from src.outreach.quality import check_copy
 from src.targeting.models import OutreachTarget, TargetStatus
@@ -67,13 +67,18 @@ async def approve(
     text = (edited_text if edited_text is not None else suggestion.draft_text) or ""
 
     if suggestion.action in (SuggestionAction.CONNECT, SuggestionAction.MESSAGE, SuggestionAction.COMMENT):
-        report = check_copy(text, suggestion.action, target)
-        suggestion.quality_score = report.score
-        suggestion.quality_warnings = report.all_issues
-        if report.blockers:
+        quality = check_copy(
+            text,
+            suggestion.action,
+            target,
+            allow_scheduler_link=sequences.allows_scheduler_link(suggestion.step),
+        )
+        suggestion.quality_score = quality.score
+        suggestion.quality_warnings = quality.all_issues
+        if quality.blockers:
             suggestion.status = SuggestionStatus.BLOCKED
             await db.commit()
-            raise ExecutionBlocked("; ".join(report.blockers))
+            raise ExecutionBlocked("; ".join(quality.blockers))
 
     suggestion.final_text = text
     suggestion.status = SuggestionStatus.SCHEDULED
@@ -166,22 +171,41 @@ async def execute_suggestion(
         SuggestionAction.MESSAGE,
         SuggestionAction.COMMENT,
     ):
-        report = check_copy(text, suggestion.action, target)
-        if report.blockers:
+        quality = check_copy(
+            text,
+            suggestion.action,
+            target,
+            allow_scheduler_link=sequences.allows_scheduler_link(suggestion.step),
+        )
+        if quality.blockers:
             suggestion.status = SuggestionStatus.BLOCKED
-            suggestion.error = "; ".join(report.blockers)
+            suggestion.error = "; ".join(quality.blockers)
             await db.commit()
             raise ExecutionBlocked(suggestion.error)
+
+    # Warm-up gate: has this account earned the right to perform this action at
+    # all? This is checked at send time as well as at suggestion time, because
+    # an account can be demoted between the two.
+    from src.outreach import health as health_module
+    from src.warmup import service as warmup_service
+
+    report = await health_module.account_health(db, record)
+    permitted, why_not = warmup_service.can_perform(record, suggestion.action, report)
+    if not permitted:
+        suggestion.scheduled_for = now + _delta(3600)
+        await db.commit()
+        raise ExecutionBlocked(why_not)
 
     # Global cap check. This consumes a slot only if it allows the action, so a
     # refusal here never burns the account's allowance.
     if rate_limiter is not None:
-        caps = caps_policy.caps_for(record, suggestion.action)
+        caps = caps_policy.caps_for(record, suggestion.action, throttle=report.throttle)
         decision = await rate_limiter.check_and_consume(
             str(record.id),
             suggestion.action,
             per_hour=caps.per_hour,
             per_day=caps.per_day,
+            per_week=caps.per_week,
             cooldown_seconds=caps.cooldown_seconds,
         )
         if not decision.allowed:
@@ -215,19 +239,52 @@ async def execute_suggestion(
         await db.commit()
         raise ExecutionBlocked(str(exc)) from exc
 
+    from src.warmup.models import ActivityStatus
+
     if result.success:
         suggestion.status = SuggestionStatus.SENT
         suggestion.sent_at = now
-        suggestion.result = {"via": result.via, "detail": result.detail}
+        suggestion.result = {
+            "via": result.via,
+            "detail": result.detail,
+            "step": suggestion.step,
+        }
         suggestion.error = None
         record.last_active_at = now
         if target is not None:
-            target.status = TargetStatus.CONTACTED
+            # Don't walk a target backwards: someone who already accepted or
+            # replied stays there when a later message goes out.
+            if target.status not in (
+                TargetStatus.CONNECTED,
+                TargetStatus.REPLIED,
+                TargetStatus.INTERESTED,
+                TargetStatus.BOOKED,
+            ):
+                target.status = TargetStatus.CONTACTED
             target.last_touched_at = now
+            if suggestion.action == SuggestionAction.CONNECT and target.invited_at is None:
+                target.invited_at = now
+            if suggestion.variant and not target.variant:
+                target.variant = suggestion.variant
     else:
         suggestion.status = SuggestionStatus.FAILED
         suggestion.error = result.error or "transport reported failure"
         suggestion.result = {"via": result.via, "detail": result.detail}
+
+    # Ledger entry: powers warm-up graduation, the funnel, and per-variant
+    # outcome attribution.
+    await warmup_service.record(
+        db,
+        record,
+        suggestion.action,
+        status=ActivityStatus.OK if result.success else ActivityStatus.FAILED,
+        subject_urn=suggestion.subject_urn,
+        target_id=suggestion.target_id,
+        variant=suggestion.variant,
+        detail={"step": suggestion.step, "via": result.via},
+        error=None if result.success else suggestion.error,
+        commit=False,
+    )
 
     await db.commit()
     await db.refresh(suggestion)

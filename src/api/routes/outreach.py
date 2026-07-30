@@ -29,7 +29,9 @@ from src.accounts import service as accounts_service
 from src.api.middleware.clerk import RequestContext, get_request_context
 from src.database.session import get_db
 from src.outreach import execute as executor
+from src.outreach import health as health_module
 from src.outreach import suggest as engine
+from src.outreach import sync as sync_module
 from src.outreach.models import OutreachSuggestion, SuggestionAction, SuggestionStatus
 from src.outreach.schemas import (
     AccountStats,
@@ -46,6 +48,8 @@ from src.outreach.schemas import (
     TargetSummary,
 )
 from src.targeting.models import OutreachTarget
+from src.warmup import planner as warmup_planner
+from src.warmup import program as warmup_program
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +300,60 @@ async def run_due(
     return RunDueResponse(**result)
 
 
+@router.post("/accounts/{account_id}/sync")
+async def sync_account(
+    account_id: str,
+    ctx: RequestContext = Depends(get_request_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Pull acceptance and reply state back from LinkedIn.
+
+    This is what stops the system talking over a real conversation: anyone who
+    replied has their sequence cancelled, and anyone who accepted becomes
+    eligible for a follow-up. Read-only against LinkedIn.
+    """
+    account = await _require_account(db, account_id, ctx.org_id)
+    return await sync_module.sync_account(db, account)
+
+
+@router.post("/targets/{target_id}/outcome")
+async def record_outcome(
+    target_id: str,
+    payload: dict,
+    ctx: RequestContext = Depends(get_request_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Record a human's verdict on a conversation: interested, booked, or not.
+
+    Anything other than "interested" ends automation for that person for good.
+    """
+    outcome = str(payload.get("outcome", "")).strip()
+    try:
+        key = uuid.UUID(str(target_id))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    target = (
+        await db.execute(
+            select(OutreachTarget).where(
+                OutreachTarget.id == key,
+                OutreachTarget.org_id == uuid.UUID(str(ctx.org_id)),
+            )
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    try:
+        target = await sync_module.set_outcome(db, target, outcome)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    return {"target_id": str(target.id), "status": target.status}
+
+
 # ----------------------------------------------------------------------
 # Reporting
 # ----------------------------------------------------------------------
@@ -404,16 +462,27 @@ async def dashboard(
             ).all()
         )
 
+        report = await health_module.account_health(db, account)
+
         remaining = {}
         for action in (SuggestionAction.CONNECT, SuggestionAction.MESSAGE, SuggestionAction.COMMENT):
-            caps = caps_policy.caps_for(account, action)
-            used = 0
+            caps = caps_policy.caps_for(account, action, throttle=report.throttle)
+            day_used = week_used = 0
             if limiter is not None:
                 try:
-                    used = int((await limiter.usage(str(account.id), action)).get("day_used", 0))
+                    usage = await limiter.usage(str(account.id), action)
+                    day_used = int(usage.get("day_used", 0))
+                    week_used = int(usage.get("week_used", 0))
                 except Exception:
-                    used = 0
-            remaining[action] = max(0, caps.per_day - used)
+                    day_used = week_used = 0
+            left = max(0, caps.per_day - day_used)
+            # Invitations are capped weekly by LinkedIn, so the weekly window
+            # is often the real constraint even when the day looks open.
+            if caps.per_week:
+                left = min(left, max(0, caps.per_week - week_used))
+            remaining[action] = left
+
+        stage = warmup_program.stage_for(warmup_planner.current_stage(account))
 
         entry = AccountStats(
             account_id=str(account.id),
@@ -429,6 +498,13 @@ async def dashboard(
             connects_sent=int(by_action.get(SuggestionAction.CONNECT, 0)),
             messages_sent=int(by_action.get(SuggestionAction.MESSAGE, 0)),
             remaining_today=remaining,
+            warmup_stage=stage.key,
+            warmup_stage_name=stage.name,
+            warmup_paused=warmup_planner.paused(account),
+            health_verdict=report.verdict,
+            health_headline=report.headline,
+            throttle=report.throttle,
+            funnel=report.funnel.as_dict(),
         )
         stats.append(entry)
 
@@ -437,6 +513,19 @@ async def dashboard(
         totals["sent_today"] += entry.sent_today
         totals["sent_total"] += entry.sent_total
         totals["failed"] += entry.failed
+        totals["invites_sent"] = totals.get("invites_sent", 0) + report.funnel.invites_sent
+        totals["invites_accepted"] = (
+            totals.get("invites_accepted", 0) + report.funnel.invites_accepted
+        )
+        totals["replies"] = totals.get("replies", 0) + report.funnel.replies
+        totals["booked"] = totals.get("booked", 0) + report.funnel.booked
+        if entry.warmup_stage != warmup_program.FINAL_STAGE:
+            totals["warming_up"] = totals.get("warming_up", 0) + 1
+
+    if totals.get("invites_sent"):
+        totals["acceptance_rate"] = round(
+            100 * totals["invites_accepted"] / totals["invites_sent"], 1
+        )
 
     return DashboardResponse(accounts=stats, totals=totals)
 

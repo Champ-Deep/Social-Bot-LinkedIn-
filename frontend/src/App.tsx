@@ -8,6 +8,7 @@ import { CampaignList } from './pages/CampaignList';
 import { CreateCampaign } from './pages/CreateCampaign';
 import { Dashboard } from './pages/Dashboard';
 import { Targeting } from './pages/Targeting';
+import { Warmup } from './pages/Warmup';
 import { Navigation } from './components/Navigation';
 
 // Create React Query client
@@ -44,6 +45,7 @@ function AnimatedRoutes() {
         <Route path="/dashboard" element={<Page><Dashboard /></Page>} />
         <Route path="/approvals" element={<Page><Approvals /></Page>} />
         <Route path="/accounts" element={<Page><Accounts /></Page>} />
+        <Route path="/warmup" element={<Page><Warmup /></Page>} />
         <Route path="/targeting" element={<Page><Targeting /></Page>} />
         <Route path="/campaigns" element={<Page><CampaignList /></Page>} />
         <Route path="/campaigns/new" element={<Page><CreateCampaign /></Page>} />
