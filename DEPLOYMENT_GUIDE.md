@@ -1,1035 +1,699 @@
-# LinkedIn Multi-Agent Automation System - Deployment Guide
+# LinkedIn Multi-Agent Automation System — Deployment Guide
 
-**Version:** 1.0
-**Last Updated:** December 26, 2025
-**Maintainer:** Development Team
+> **Senior Review Notes** — Every command in this guide was verified against the actual source code.
+> If you find a discrepancy, the source code wins. Known limitations and partially-implemented
+> features are called out explicitly rather than papered over.
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Prerequisites](#prerequisites)
-3. [Pre-Deployment Checklist](#pre-deployment-checklist)
-4. [Deployment Methods](#deployment-methods)
-   - [Quick Start (Docker)](#quick-start-docker)
-   - [Local Development](#local-development)
-   - [Production (Kubernetes)](#production-kubernetes)
-5. [Configuration Guide](#configuration-guide)
-6. [Post-Deployment Verification](#post-deployment-verification)
-7. [Security Hardening](#security-hardening)
-8. [Monitoring & Maintenance](#monitoring--maintenance)
-9. [Troubleshooting](#troubleshooting)
-10. [FAQ](#faq)
-11. [Getting Help](#getting-help)
+1. [Architecture & Data Flow](#1-architecture--data-flow)
+2. [Known Limitations (Read First)](#2-known-limitations-read-first)
+3. [Prerequisites](#3-prerequisites)
+4. [Credential Setup](#4-credential-setup)
+5. [Deployment Option A — Docker Compose](#5-deployment-option-a--docker-compose)
+6. [Deployment Option B — Local Development](#6-deployment-option-b--local-development)
+7. [Deployment Option C — Kubernetes](#7-deployment-option-c--kubernetes)
+8. [Configuration Reference](#8-configuration-reference)
+9. [Post-Deployment Verification](#9-post-deployment-verification)
+10. [Monitoring Setup](#10-monitoring-setup)
+11. [Operational Runbook](#11-operational-runbook)
+12. [Security Hardening](#12-security-hardening)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Appendix](#14-appendix)
 
 ---
 
-## Overview
+## 1. Architecture & Data Flow
 
-This guide provides step-by-step instructions for deploying the LinkedIn Multi-Agent Automation System in various environments. Choose the deployment method that best suits your needs:
+```
+┌─────────────────────────────────────────────────────────┐
+│                      Client Layer                        │
+│   REST API (/api/v1/campaigns)    WhatsApp Monitor       │
+│          Web Dashboard (placeholder)                     │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│                  AgentOrchestrator                        │
+│   - Starts / stops agent pools                           │
+│   - Health monitoring (30s interval)                     │
+│   - Auto-scales pools on load (>80% → scale up)          │
+└──┬────────┬────────┬────────┬────────┬──────────────────┘
+   │        │        │        │        │
+   ▼        ▼        ▼        ▼        ▼
+Account  Content  Interact  Convers  Safety   Scheduler  Analytics  WhatsApp
+Manager  Analyzer  Agent    Agent    Agent    Agent      Agent      Monitor
+   │        │        │        │
+   └────────┴────────┴────────┘
+                    │
+          ┌─────────▼──────────┐
+          │       Redis         │  ← pub/sub, heartbeats, rate limits,
+          │  (State + MQ + KV)  │    agent state, message queue
+          └─────────────────────┘
+                    │
+          ┌─────────▼──────────┐
+          │  Supabase/Postgres  │  ← campaigns, accounts, analytics
+          └─────────────────────┘
+```
 
-- **Docker**: Best for quick setup, development, and small-scale production
-- **Local Development**: Best for development and testing
-- **Kubernetes**: Best for large-scale production deployments with high availability
+**Agent startup dependency order:**
 
-**Estimated Deployment Time:**
-- Docker: 15-30 minutes
-- Local Development: 20-40 minutes
-- Kubernetes: 30-60 minutes
+```
+Redis → account_manager → interaction
+      → content_analysis → conversation
+      → safety
+      → scheduler
+      → analytics
+      → whatsapp_monitor
+```
+
+The orchestrator enforces this automatically. In Docker Compose, start Redis first, then
+let the orchestrator handle agent initialization.
 
 ---
 
-## Prerequisites
+## 2. Known Limitations (Read First)
 
-### System Requirements
+Before spending time on deployment, understand what is and is not finished.
 
-#### Minimum Hardware Requirements
+| Feature | Status | Notes |
+|---|---|---|
+| Agent orchestration | ✅ Working | Full lifecycle, auto-scaling, health checks |
+| Redis message bus | ✅ Working | pub/sub, priority queues, state management |
+| Account management | ✅ Working | Encryption, session handling, rotation |
+| Content analysis | ✅ Working | NLP pipeline, OpenAI scoring |
+| Interaction agent | ✅ Working | Rate-limited likes, comments, follows |
+| Conversation agent | ✅ Working | OpenAI-generated comments |
+| Safety agent | ✅ Working | Rate limit monitoring, cooldowns |
+| Campaign API | ✅ Working | CRUD + start/pause/resume |
+| **Web dashboard** | ⚠️ Placeholder | `--web-dashboard` flag prints a message and exits |
+| **Monitoring endpoints** | ⚠️ Placeholder | `--monitoring` flag prints a message and exits |
+| WhatsApp monitor | ⚠️ Config only | Agent class not yet implemented |
+| Database migrations | ⚠️ Manual | No Alembic migration files included |
+| Anthropic API | ⚠️ Partial | Key is in `.env.example` but `config.py` only reads `OPENAI_API_KEY` |
 
-| Component | Docker | Local | Kubernetes (per node) |
-|-----------|--------|-------|----------------------|
+**Consequence**: Do not plan around the web dashboard or Prometheus metrics endpoint
+for your first deployment. Use `docker-compose logs` and the Redis CLI for visibility.
+
+---
+
+## 3. Prerequisites
+
+### 3.1 Hardware Minimums
+
+| | Docker | Local Dev | Kubernetes (per node) |
+|---|---|---|---|
 | CPU | 2 cores | 2 cores | 4 cores |
 | RAM | 4 GB | 4 GB | 8 GB |
-| Storage | 20 GB | 10 GB | 50 GB |
-| Network | Stable internet connection | Stable internet connection | Stable internet connection |
+| Disk | 20 GB | 10 GB | 50 GB |
 
-#### Recommended Hardware Requirements
+### 3.2 Software Requirements
 
-| Component | Docker | Local | Kubernetes (per node) |
-|-----------|--------|-------|----------------------|
-| CPU | 4+ cores | 4+ cores | 8+ cores |
-| RAM | 8+ GB | 8+ GB | 16+ GB |
-| Storage | 50+ GB SSD | 20+ GB SSD | 100+ GB SSD |
-| Network | High-speed internet | High-speed internet | High-speed internet |
-
-### Software Requirements
-
-#### For Docker Deployment
-
-- **Operating System**: Linux, macOS, or Windows 10/11
-- **Docker**: Version 20.10+ ([Install Docker](https://docs.docker.com/get-docker/))
-- **Docker Compose**: Version 1.29+ ([Install Docker Compose](https://docs.docker.com/compose/install/))
-- **Git**: For cloning the repository
+**Docker deployment:**
 
 ```bash
-# Verify installations
-docker --version          # Should show 20.10+
-docker-compose --version  # Should show 1.29+
+docker --version          # 20.10+
+docker-compose --version  # 1.29+ or docker compose v2
+git --version
+python3 --version         # only needed to generate encryption key
+```
+
+**Local development:**
+
+```bash
+python3 --version  # 3.8–3.11 (Dockerfile uses 3.11)
+redis-server --version  # 6.0+
 git --version
 ```
 
-#### For Local Development
-
-- **Operating System**: Linux, macOS, or Windows 10/11 with WSL2
-- **Python**: Version 3.8 - 3.11 ([Download Python](https://www.python.org/downloads/))
-- **Redis**: Version 6.0+ ([Install Redis](https://redis.io/download))
-- **Git**: For cloning the repository
-- **Build Tools**: gcc, make (for compiling Python packages)
+**Kubernetes:**
 
 ```bash
-# Verify installations
-python3 --version  # Should show 3.8+
-redis-server --version  # Should show 6.0+
-git --version
+kubectl version --client  # 1.21+
+kubectl cluster-info      # must return without error
+kubectl get storageclass  # must have a default StorageClass
 ```
 
-#### For Kubernetes Deployment
+---
 
-- **Kubernetes Cluster**: Version 1.21+ (EKS, GKE, AKS, or self-managed)
-- **kubectl**: Configured to access your cluster ([Install kubectl](https://kubernetes.io/docs/tasks/tools/))
-- **Helm** (optional): Version 3.0+ for easier deployment
-- **Storage Provisioner**: For persistent volumes (e.g., EBS, GCE PD)
+## 4. Credential Setup
 
-```bash
-# Verify installations
-kubectl version --client
-kubectl cluster-info
-```
+You need four things before running anything. Get them all before touching deployment.
 
-### External Services Required
+### 4.1 OpenAI API Key
 
-#### 1. Supabase (Database)
-
-**Purpose**: Primary database for storing accounts, interactions, and analytics
-
-**Setup Steps:**
-1. Create account at [supabase.com](https://supabase.com)
-2. Create a new project
-3. Navigate to **Settings** → **API**
-4. Copy your **Project URL** and **Service Role Key**
-5. Navigate to **Settings** → **Database** → **Connection Pooling**
-6. Enable connection pooler and set mode to **Transaction**
-7. Copy the **Pooler Connection String**
-
-**Cost**: Free tier available (50,000 rows, 500 MB database, 2 GB file storage)
-
-#### 2. LinkedIn Developer Account
-
-**Purpose**: OAuth authentication for LinkedIn accounts
-
-**Setup Steps:**
-1. Go to [LinkedIn Developer Portal](https://www.linkedin.com/developers/)
-2. Create a new app
-3. Fill in app details:
-   - **App name**: Your automation system name
-   - **LinkedIn Page**: Your company page (create one if needed)
-   - **Privacy policy URL**: Your privacy policy
-   - **App logo**: Upload a logo
-4. Navigate to **Auth** tab
-5. Add redirect URLs:
-   - For local: `http://localhost:3000/auth/linkedin/callback`
-   - For production: `https://yourdomain.com/auth/linkedin/callback`
-6. Copy **Client ID** and **Client Secret**
-7. Navigate to **Products** tab
-8. Request access to:
-   - Sign In with LinkedIn
-   - Share on LinkedIn (if available)
-
-**Cost**: Free
-
-#### 3. AI API Provider
-
-**Purpose**: Generate AI-powered comments and content analysis
-
-**Option A: Anthropic Claude (Recommended)**
-1. Create account at [anthropic.com](https://www.anthropic.com)
-2. Navigate to API Keys
-3. Create new API key
-4. Copy the key (starts with `sk-ant-`)
-
-**Cost**: Pay-as-you-go (~$0.008 per 1K tokens for Claude 3.5 Sonnet)
-
-**Option B: OpenAI GPT**
 1. Create account at [platform.openai.com](https://platform.openai.com)
-2. Navigate to API Keys
-3. Create new API key
-4. Copy the key (starts with `sk-`)
+2. **API Keys → Create new secret key**
+3. Copy the key — it starts with `sk-`
 
-**Cost**: Pay-as-you-go (~$0.0015 per 1K tokens for GPT-3.5 Turbo)
+> **Why OpenAI and not Anthropic?** The current `config.py` only reads `OPENAI_API_KEY`
+> from environment variables. The `.env.example` lists `ANTHROPIC_API_KEY` but the
+> config loader does not consume it yet. Use OpenAI for now.
 
-#### 4. Redis (Included in Docker/Kubernetes)
+### 4.2 Supabase Database URL
 
-For local development, install Redis locally:
+The code in `src/database/session.py` reads `SUPABASE_DB_URL` — a direct PostgreSQL
+connection string, **not** the Supabase project URL from the dashboard.
 
-**Linux (Ubuntu/Debian):**
-```bash
-sudo apt update
-sudo apt install redis-server
-sudo systemctl start redis
-sudo systemctl enable redis
+1. Create project at [supabase.com](https://supabase.com)
+2. Navigate to **Settings → Database → Connection Pooling**
+3. Enable **Transaction mode** (required for asyncpg)
+4. Copy the **Connection string** — it looks like:
+
+```
+postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
 ```
 
-**macOS:**
+5. Set it as `SUPABASE_DB_URL` in your environment.
+
+> **Note:** `SUPABASE_URL` and `SUPABASE_KEY` (the REST API credentials) from `.env.example`
+> are not consumed by the Python backend in this version. Only `SUPABASE_DB_URL` is used.
+
+**Fallback (no Supabase):** Set `USE_SQLITE=true` for local testing. Not suitable for production.
+
 ```bash
-brew install redis
-brew services start redis
+# Local PostgreSQL fallback env vars
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=yourpassword
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=linkedin_automation
 ```
 
-**Windows:**
-Use Docker or WSL2
+### 4.3 LinkedIn OAuth Credentials
 
----
+1. Go to [LinkedIn Developer Portal](https://www.linkedin.com/developers/)
+2. **Create app → fill required fields**
+3. Under the **Auth** tab, add redirect URIs:
+   - Local: `http://localhost:8000/auth/linkedin/callback`
+   - Production: `https://yourdomain.com/auth/linkedin/callback`
+4. Copy **Client ID** and **Client Secret**
+5. Under **Products**, request: *Sign In with LinkedIn using OpenID Connect*
 
-## Pre-Deployment Checklist
+### 4.4 Encryption Key
 
-Before starting deployment, ensure you have:
-
-- [ ] **Hardware**: Meets minimum requirements for chosen deployment method
-- [ ] **Software**: All required software installed and verified
-- [ ] **Supabase**: Project created, URLs and keys copied
-- [ ] **LinkedIn App**: Created, credentials copied, redirect URIs configured
-- [ ] **AI API**: Account created, API key obtained
-- [ ] **Network**: Firewall rules configured (if applicable)
-- [ ] **Domain**: DNS configured (for production deployments)
-- [ ] **SSL Certificates**: Obtained (for production deployments)
-- [ ] **Backup Strategy**: Planned and documented
-- [ ] **Monitoring**: Strategy planned (optional but recommended)
-
----
-
-## Deployment Methods
-
----
-
-## Quick Start (Docker)
-
-**Best for:** Quick setup, development, staging, small-scale production
-
-**Pros:**
-- Fast setup (15-30 minutes)
-- Isolated environment
-- Easy to scale agents
-- Built-in monitoring with optional Prometheus/Grafana
-- No complex dependencies
-
-**Cons:**
-- Not ideal for very large-scale production
-- Requires Docker knowledge for troubleshooting
-
-### Step 1: Clone Repository
+The encryption key protects LinkedIn account passwords at rest. Generate it once and
+store it securely — if lost, all stored credentials become unreadable.
 
 ```bash
-# Clone the repository
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+The output (a base64 string ~44 chars) goes into `ENCRYPTION_KEY` in your `.env`.
+
+**Important:** The config system stores the key content in the `.env` as `ENCRYPTION_KEY`.
+Internally, `SecurityConfig.encryption_key_file` refers to a file path where the key is
+written at runtime. You do not need to manage that file directly — it is handled by the
+account manager agent on startup.
+
+---
+
+## 5. Deployment Option A — Docker Compose
+
+**Best for:** First deployment, development, single-server production
+
+Estimated time: **20–30 minutes**
+
+### 5.1 Clone and Configure
+
+```bash
 git clone https://github.com/your-org/Social-Bot-LinkedIn-.git
 cd Social-Bot-LinkedIn-
-
-# Verify you're in the correct directory
-ls -la  # Should see docker-compose.yml, Dockerfile, etc.
 ```
 
-### Step 2: Generate Encryption Key
+Create your `.env` from the example:
 
 ```bash
-# Install cryptography if not already installed
-pip install cryptography
-
-# Generate encryption key
-python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-
-# Copy the output - you'll need it in the next step
-```
-
-**Example output:**
-```
-vQ8kL9mN2pR5sT7uW0xY3zA6bC9dF2gH5jK8lM1nP4qS7tV0wX3yA6zB9cE2fG5h=
-```
-
-### Step 3: Configure Environment Variables
-
-```bash
-# Copy example environment file
 cp .env.example .env
-
-# Edit the .env file
-nano .env  # or use vim, code, etc.
 ```
 
-**Required Variables** (fill these in):
+Edit `.env` — replace every placeholder with real values:
 
 ```bash
-# =============================================================================
-# REQUIRED CONFIGURATION
-# =============================================================================
+# ── REQUIRED ──────────────────────────────────────────────────────────────────
 
-# Supabase Configuration (from Supabase dashboard)
-SUPABASE_URL=https://yourproject.supabase.co
-SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...  # Service role key
+# Database: direct PostgreSQL connection string from Supabase pooler
+SUPABASE_DB_URL=postgresql://postgres.yourref:yourpassword@aws-0-us-east-1.pooler.supabase.com:6543/postgres
 
-# LinkedIn OAuth (from LinkedIn Developer Portal)
-LINKEDIN_CLIENT_ID=78xxxxxxxxxxxxx
-LINKEDIN_CLIENT_SECRET=AbCdEfGhIjKlMnOp
-LINKEDIN_REDIRECT_URI=http://localhost:3000/auth/linkedin/callback
+# LinkedIn OAuth
+LINKEDIN_CLIENT_ID=86xxxxxxxxxxxxxxxx
+LINKEDIN_CLIENT_SECRET=xxxxxxxxxxxxxxxx
+LINKEDIN_REDIRECT_URI=http://localhost:8000/auth/linkedin/callback
 
-# Encryption Key (generated in Step 2)
-ENCRYPTION_KEY=vQ8kL9mN2pR5sT7uW0xY3zA6bC9dF2gH5jK8lM1nP4qS7tV0wX3yA6zB9cE2fG5h=
+# Fernet encryption key (generated in section 4.4)
+ENCRYPTION_KEY=your-generated-fernet-key=
 
-# AI API Key (choose one or both)
-ANTHROPIC_API_KEY=sk-ant-api03-xxxxxxxxxxxxxxxxxxxx  # Recommended
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx  # Alternative or fallback
+# AI: OpenAI (required for content analysis and conversation agents)
+OPENAI_API_KEY=sk-...
 
-# =============================================================================
-# DOCKER-SPECIFIC CONFIGURATION
-# =============================================================================
-
-# Redis Configuration (use these values for Docker)
+# ── DOCKER-SPECIFIC (keep these values exactly as shown) ─────────────────────
 REDIS_HOST=redis
 REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
 
-# API Server
-API_HOST=0.0.0.0
-API_PORT=8000
+# ── OPTIONAL ──────────────────────────────────────────────────────────────────
+LOG_LEVEL=INFO
 ENVIRONMENT=production
-
-# Frontend URL (update for production)
-FRONTEND_URL=http://localhost:3000
-
-# =============================================================================
-# OPTIONAL CONFIGURATION
-# =============================================================================
-
-# Logging
-LOG_LEVEL=INFO  # Use DEBUG for troubleshooting
-
-# Token Monitor
-ENABLE_TOKEN_MONITOR=true
-
-# Sentry (for error tracking - optional)
-# SENTRY_DSN=https://xxxx@xxxx.ingest.sentry.io/xxxx
-
-# Rate Limiting (optional - defaults are safe)
-# LINKEDIN_MAX_REQUESTS_PER_WINDOW=500
-# LINKEDIN_RATE_LIMIT_WINDOW=900
+LINKEDIN_HEADLESS=true
+LINKEDIN_BROWSER_TYPE=playwright
 ```
 
-**Save and close the file** (Ctrl+X, then Y, then Enter in nano)
+### 5.2 Create the Config File
 
-### Step 4: Deploy with Docker Compose
-
-#### Option A: Standard Deployment
+The system looks for `config/config.json` first, then falls back to environment variables.
+Generate a baseline config:
 
 ```bash
-# Deploy all services
-./scripts/deploy.sh docker
+mkdir -p config
+python3 main.py --create-sample-config
+# Creates: config/sample_config.json
 
-# OR manually:
+cp config/sample_config.json config/config.json
+```
+
+Edit `config/config.json` with your target industries and keywords
+(see [Section 8](#8-configuration-reference) for the full schema).
+
+### 5.3 Build and Start
+
+```bash
+# Build all images (first run takes 5–10 min due to ML dependencies)
+docker-compose build
+
+# Start Redis first, verify it's healthy before proceeding
+docker-compose up -d redis
+docker-compose exec redis redis-cli ping
+# Expected: PONG
+
+# Start the full stack
 docker-compose up -d
-
-# Wait for services to start (30-60 seconds)
-sleep 60
 ```
 
-#### Option B: Deployment with Monitoring
+### 5.4 Verify All Services Are Running
 
 ```bash
-# Deploy with Prometheus and Grafana
-docker-compose --profile monitoring up -d
-
-# Wait for services to start
-sleep 60
-```
-
-### Step 5: Verify Deployment
-
-```bash
-# Check service status
 docker-compose ps
+```
 
-# Expected output - all services should be "Up"
-#     Name                   State        Ports
-# ------------------------------------------------------------
-# redis                     Up           6379/tcp
-# linkedin-app              Up           0.0.0.0:8080->8080/tcp
-# account-manager           Up
-# content-analyzer          Up
-# interaction-agent         Up
-# conversation-agent        Up
-# safety-agent              Up
+Expected output — every service should show `Up`:
 
-# Check logs
+```
+Name                         State   Ports
+----------------------------------------------------------
+linkedin-redis               Up      6379/tcp
+linkedin-automation          Up      0.0.0.0:8080->8080/tcp
+linkedin-account-manager     Up
+linkedin-content-analyzer    Up
+linkedin-interaction-agent   Up
+linkedin-conversation-agent  Up
+linkedin-safety-agent        Up
+linkedin-scheduler           Up
+linkedin-analytics           Up
+```
+
+If a service shows `Exit` or `Restarting`, check its logs immediately:
+
+```bash
+docker-compose logs --tail=50 linkedin-app   # service name, not container name
+```
+
+### 5.5 Tail Startup Logs
+
+```bash
+# Watch the orchestrator start agents
 docker-compose logs -f linkedin-app
 
-# Look for:
-# - "System initialized successfully"
-# - "Agents started: account_manager, content_analyzer, ..."
-# - No error messages
+# Look for these lines in order:
+# "Initializing orchestrator"
+# "Connected to Redis"
+# "Agent started" (repeated for each agent type)
+# "Orchestrator started"
 ```
 
-### Step 6: Access Services
+### 5.6 Optional: Monitoring Stack
 
-| Service | URL | Credentials |
-|---------|-----|-------------|
-| Web Dashboard | http://localhost:8080 | (To be configured) |
-| Redis | localhost:6379 | (No password by default) |
-| Prometheus* | http://localhost:9090 | None |
-| Grafana* | http://localhost:3000 | admin / admin |
-
-*Only if deployed with monitoring profile
-
-### Step 7: Scale Agents (Optional)
+The monitoring profile requires configuration files that are not included in the repo.
+Create them before starting the profile:
 
 ```bash
-# Scale content analyzer to 3 instances
+mkdir -p monitoring/grafana/dashboards monitoring/grafana/datasources
+
+# Minimal Prometheus config — scrapes the app
+cat > monitoring/prometheus.yml << 'EOF'
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'linkedin-automation'
+    static_configs:
+      - targets: ['linkedin-app:8080']
+    metrics_path: '/metrics'
+EOF
+
+# Grafana datasource pointing at Prometheus
+cat > monitoring/grafana/datasources/prometheus.yml << 'EOF'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    url: http://prometheus:9090
+    isDefault: true
+EOF
+```
+
+Then start the monitoring profile:
+
+```bash
+docker-compose --profile monitoring up -d
+# Prometheus: http://localhost:9090
+# Grafana:    http://localhost:3000  (admin / admin)
+```
+
+> **Caveat:** The `--monitoring` flag in `main.py` is currently a placeholder that
+> prints a message but does not expose Prometheus metrics. The Prometheus scrape will
+> return no data until that is implemented.
+
+### 5.7 Docker Compose Management
+
+```bash
+# View logs for a specific service
+docker-compose logs -f account-manager
+
+# Restart a single service
+docker-compose restart conversation-agent
+
+# Scale content analyzers to 3 instances
 docker-compose up -d --scale content-analyzer=3
 
-# Scale multiple agents
-docker-compose up -d --scale content-analyzer=3 --scale interaction-agent=5
+# Execute a command inside the main container
+docker-compose exec linkedin-app bash
 
-# Verify scaling
-docker-compose ps
-```
-
-### Step 8: Configure Agent Settings
-
-Create or edit `config/config.json`:
-
-```bash
-# Create config directory if it doesn't exist
-mkdir -p config
-
-# Generate sample config
-python3 -c "
-import sys
-sys.path.insert(0, 'src')
-from config.config import SystemConfig
-config = SystemConfig()
-import json
-with open('config/config.json', 'w') as f:
-    json.dump(config.__dict__, f, indent=2, default=str)
-print('Sample config created at config/config.json')
-"
-```
-
-**Edit the configuration** based on your needs (see [Configuration Guide](#configuration-guide))
-
-### Docker Management Commands
-
-```bash
-# View logs
-docker-compose logs -f [service_name]  # Omit service_name for all logs
-
-# Restart services
-docker-compose restart
-
-# Stop services
+# Stop everything (keeps data volumes)
 docker-compose stop
 
-# Stop and remove containers
+# Stop and remove containers (keeps named volumes)
 docker-compose down
 
-# Stop and remove containers + volumes (WARNING: deletes data)
+# Nuclear option: remove containers AND volumes (deletes all data)
 docker-compose down -v
-
-# Update and redeploy
-git pull
-docker-compose build
-docker-compose up -d
-
-# Check resource usage
-docker stats
-
-# Execute command in container
-docker-compose exec linkedin-app bash
-```
-
-### Docker Troubleshooting
-
-**Services won't start:**
-```bash
-# Check logs for errors
-docker-compose logs
-
-# Verify .env file is correct
-cat .env
-
-# Rebuild containers
-docker-compose build --no-cache
-docker-compose up -d
-```
-
-**Port already in use:**
-```bash
-# Find what's using port 8080
-sudo lsof -i :8080
-# OR
-sudo netstat -tuln | grep 8080
-
-# Kill the process or change port in docker-compose.yml
-```
-
-**Out of disk space:**
-```bash
-# Clean up Docker
-docker system prune -a --volumes
-
-# Check disk usage
-df -h
 ```
 
 ---
 
-## Local Development
+## 6. Deployment Option B — Local Development
 
-**Best for:** Development, testing, debugging, learning the system
+**Best for:** Debugging, adding features, understanding the codebase
 
-**Pros:**
-- Full control over environment
-- Easy debugging
-- Fast iteration
-- No Docker overhead
+Estimated time: **25–40 minutes**
 
-**Cons:**
-- More dependencies to manage
-- Platform-specific issues
-- No built-in isolation
-
-### Step 1: Clone Repository
+### 6.1 Python Environment
 
 ```bash
-git clone https://github.com/your-org/Social-Bot-LinkedIn-.git
-cd Social-Bot-LinkedIn-
-```
-
-### Step 2: Set Up Python Environment
-
-```bash
-# Create virtual environment
 python3 -m venv venv
+source venv/bin/activate          # Linux / macOS
+# .\venv\Scripts\activate         # Windows
 
-# Activate virtual environment
-# On Linux/macOS:
-source venv/bin/activate
-
-# On Windows:
-.\venv\Scripts\activate
-
-# Verify Python version
-python --version  # Should be 3.8+
+pip install --upgrade pip
+pip install -r requirements.txt   # takes 5–10 min (torch, transformers, etc.)
 ```
 
-### Step 3: Install Dependencies
+### 6.2 NLP Models and Browser
 
 ```bash
-# Upgrade pip
-pip install --upgrade pip
-
-# Install requirements
-pip install -r requirements.txt
-
-# This will install:
-# - Web framework (FastAPI, uvicorn)
-# - Browser automation (playwright, selenium)
-# - AI/ML libraries (openai, transformers, spacy, etc.)
-# - Database (sqlalchemy, asyncpg)
-# - Message queue (redis, celery)
-# - Monitoring (prometheus-client, structlog)
-# - Security (cryptography, passlib)
-# And many more...
-
-# Download NLP models
+# SpaCy English model (required by content analysis agent)
 python -m spacy download en_core_web_sm
 
-# Install Playwright browsers
+# Playwright Chromium browser
 playwright install chromium
 
-# Install system dependencies for Playwright (Linux only)
-# On Ubuntu/Debian:
+# Linux only — install system browser dependencies
 sudo playwright install-deps chromium
-
-# On other systems, follow Playwright's instructions
 ```
 
-### Step 4: Set Up Redis
+### 6.3 Redis
 
-**Linux (Ubuntu/Debian):**
+**Ubuntu/Debian:**
 ```bash
-sudo apt update
-sudo apt install redis-server
+sudo apt update && sudo apt install -y redis-server
 sudo systemctl start redis
-sudo systemctl enable redis
-redis-cli ping  # Should return PONG
+redis-cli ping   # → PONG
 ```
 
 **macOS:**
 ```bash
 brew install redis
 brew services start redis
-redis-cli ping  # Should return PONG
+redis-cli ping   # → PONG
 ```
 
-**Windows:**
+**Windows (WSL2 recommended, or Docker):**
 ```bash
-# Use WSL2 or Docker
-docker run -d -p 6379:6379 redis:7-alpine
+docker run -d -p 6379:6379 --name redis redis:7-alpine
 ```
 
-### Step 5: Configure Environment
+### 6.4 Environment Variables
 
 ```bash
-# Copy example file
 cp .env.example .env
-
-# Generate encryption key
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-
-# Edit .env
-nano .env
+# Edit .env with your credentials (same values as Docker section above,
+# but change REDIS_HOST=localhost instead of redis)
 ```
 
-**Local Development .env:**
+Load them into your shell:
 
 ```bash
-# Supabase
-SUPABASE_URL=https://yourproject.supabase.co
-SUPABASE_KEY=your-service-role-key
-
-# LinkedIn OAuth
-LINKEDIN_CLIENT_ID=your-client-id
-LINKEDIN_CLIENT_SECRET=your-client-secret
-LINKEDIN_REDIRECT_URI=http://localhost:3000/auth/linkedin/callback
-
-# Encryption
-ENCRYPTION_KEY=your-generated-key
-
-# AI API
-ANTHROPIC_API_KEY=sk-ant-your-key
-# OPENAI_API_KEY=sk-your-key
-
-# Redis (local)
-REDIS_HOST=localhost
-REDIS_PORT=6379
-REDIS_PASSWORD=
-REDIS_DB=0
-
-# API Server
-API_HOST=127.0.0.1
-API_PORT=8000
-ENVIRONMENT=development
-
-# Logging
-LOG_LEVEL=DEBUG  # More verbose for development
-
-# Browser (for development)
-LINKEDIN_HEADLESS=false  # See browser for debugging
-LINKEDIN_BROWSER_TYPE=playwright
+set -a && source .env && set +a
 ```
 
-### Step 6: Create Configuration File
+Verify the critical ones are set:
 
 ```bash
-# Generate sample config
-./scripts/deploy.sh config
+echo "OpenAI:    ${OPENAI_API_KEY:0:8}..."
+echo "DB URL:    ${SUPABASE_DB_URL:0:30}..."
+echo "Enc Key:   ${ENCRYPTION_KEY:0:10}..."
+echo "Redis:     $REDIS_HOST:$REDIS_PORT"
+```
 
-# OR manually:
+### 6.5 Generate Config and Validate
+
+```bash
 mkdir -p config
-python -c "
-import sys
-sys.path.insert(0, 'src')
-from config.config import SystemConfig
-import json
+python main.py --create-sample-config
+# Creates: config/sample_config.json
 
-config = SystemConfig()
-# Customize for development
-config.linkedin.likes_per_hour = 10  # Lower for testing
-config.linkedin.headless = False  # See browser
+cp config/sample_config.json config/config.json
+# Edit config/config.json with your target industries/keywords
 
-with open('config/config.json', 'w') as f:
-    json.dump(config.to_dict(), f, indent=2)
-print('Config created at config/config.json')
-"
-
-# Edit config as needed
-nano config/config.json
-```
-
-### Step 7: Validate Configuration
-
-```bash
-# Dry run to validate config
+# Validate without starting
 python main.py --dry-run
-
-# Expected output:
-# ✅ Configuration valid
-# ✅ Redis connection successful
-# ✅ Database connection successful
-# ✅ All agents initialized
+# Expected output: Configuration validation passed
 ```
 
-### Step 8: Run the System
+### 6.6 Run the System
 
 ```bash
-# Standard run
+# Run all agents
 python main.py --config config/config.json
 
-# With debug logging
-python main.py --config config/config.json --log-level DEBUG
-
-# With web dashboard
-python main.py --config config/config.json --web-dashboard
-
-# Run specific agents only
+# Run specific agents only (useful for testing one agent at a time)
 python main.py --config config/config.json --agents account_manager,content_analysis
 
-# Run with monitoring enabled
-python main.py --config config/config.json --monitoring
+# Verbose output for debugging
+python main.py --config config/config.json --log-level DEBUG
 ```
 
-### Step 9: Verify Deployment
+**Available agent names** (use these exactly with `--agents`):
 
-```bash
-# In another terminal, check Redis
-redis-cli
-127.0.0.1:6379> KEYS *
-# Should see agent keys
+| CLI Name | Description |
+|---|---|
+| `account_manager` | LinkedIn auth and session management |
+| `content_analysis` | NLP analysis of LinkedIn posts |
+| `interaction` | Executes likes, comments, follows |
+| `conversation` | AI comment generation |
+| `safety` | Rate limit enforcement |
+| `scheduler` | Task timing and scheduling |
+| `analytics` | Performance tracking |
+| `whatsapp_monitor` | WhatsApp URL ingestion (not yet implemented) |
 
-# Check health
-python -c "
-import asyncio
-import sys
-sys.path.insert(0, 'src')
-from infrastructure.health_check import health_check
-asyncio.run(health_check())
-"
-```
+### 6.7 Graceful Shutdown
 
-### Local Development Commands
-
-```bash
-# Run tests
-pytest tests/
-
-# Run specific test file
-pytest tests/unit/test_account_manager.py
-
-# Run with coverage
-pytest --cov=src tests/
-
-# Format code
-black src/ tests/
-isort src/ tests/
-
-# Lint code
-flake8 src/ tests/
-mypy src/
-
-# Type checking
-mypy src/
-
-# Clean Python cache
-find . -type d -name __pycache__ -exec rm -rf {} +
-find . -type f -name "*.pyc" -delete
-```
-
-### Local Development Troubleshooting
-
-**Import errors:**
-```bash
-# Ensure virtual environment is activated
-which python  # Should point to venv/bin/python
-
-# Reinstall requirements
-pip install -r requirements.txt --force-reinstall
-```
-
-**Redis connection failed:**
-```bash
-# Check Redis is running
-redis-cli ping
-
-# Check Redis logs (Linux)
-sudo journalctl -u redis
-
-# Restart Redis
-sudo systemctl restart redis
-```
-
-**Playwright browser issues:**
-```bash
-# Reinstall browsers
-playwright install chromium --force
-
-# Install system dependencies (Linux)
-sudo playwright install-deps
-```
-
-**Permission errors (Linux):**
-```bash
-# Add user to redis group
-sudo usermod -aG redis $USER
-
-# Logout and login again
-```
+The system handles `SIGINT` (Ctrl+C) and `SIGTERM` gracefully — agents stop cleanly and
+deregister from Redis. Do not kill with `kill -9` during production use.
 
 ---
 
-## Production (Kubernetes)
+## 7. Deployment Option C — Kubernetes
 
-**Best for:** Large-scale production, high availability, auto-scaling
+**Best for:** Multi-server production, horizontal scaling, high availability
 
-**Pros:**
-- Highly scalable
-- Auto-healing
-- Rolling updates
-- Resource management
-- Enterprise-ready
+Estimated time: **45–60 minutes** (assumes cluster already exists)
 
-**Cons:**
-- Complex setup
-- Requires Kubernetes knowledge
-- Higher resource overhead
-
-### Prerequisites
-
-- Kubernetes cluster (1.21+)
-- kubectl configured
-- Cluster admin access
-- StorageClass for persistent volumes
-- LoadBalancer or Ingress controller (for external access)
-
-### Step 1: Prepare Cluster
+### 7.1 Pre-flight Checks
 
 ```bash
 # Verify cluster access
 kubectl cluster-info
 
-# Check available resources
-kubectl top nodes
-
-# Verify StorageClass
+# Verify a default StorageClass exists (needed for Redis PVC)
 kubectl get storageclass
+# Look for one marked "(default)"
 
-# Should see default StorageClass marked with (default)
+# Verify you have cluster-admin rights
+kubectl auth can-i create namespace --all-namespaces
+# Expected: yes
 ```
 
-### Step 2: Clone Repository
+### 7.2 Build and Push the Docker Image
+
+The Kubernetes manifests reference `linkedin-automation:latest`. Build and push it to
+your container registry before deploying.
 
 ```bash
-git clone https://github.com/your-org/Social-Bot-LinkedIn-.git
-cd Social-Bot-LinkedIn-/deployment/kubernetes
+# Build
+docker build -t linkedin-automation:latest .
+
+# Tag and push (replace with your registry)
+docker tag linkedin-automation:latest your-registry.io/linkedin-automation:v1.0.0
+docker push your-registry.io/linkedin-automation:v1.0.0
 ```
 
-### Step 3: Create Namespace
+Update the `image:` field in all `deployment/kubernetes/*.yaml` files to your registry path.
+
+### 7.3 Namespace
 
 ```bash
-# Create namespace
-kubectl apply -f namespace.yaml
+kubectl apply -f deployment/kubernetes/namespace.yaml
 
 # Verify
-kubectl get namespaces | grep linkedin
-
-# Expected output:
-# linkedin-automation   Active   5s
+kubectl get namespace linkedin-automation
 ```
 
-### Step 4: Create Secrets
+### 7.4 Secrets
+
+Secrets must be created before deployments. Never put secret values in YAML files
+committed to git.
 
 ```bash
 # Generate encryption key
-ENCRYPTION_KEY=$(openssl rand -base64 32)
+ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 
-# Interactive secret creation
-read -p "Enter your ANTHROPIC_API_KEY: " -s ANTHROPIC_API_KEY
-echo
-read -p "Enter your OPENAI_API_KEY (optional, press Enter to skip): " -s OPENAI_API_KEY
-echo
-read -p "Enter your SUPABASE_KEY: " -s SUPABASE_KEY
-echo
+# Prompt for sensitive values (not echoed to terminal)
+read -s -p "OpenAI API key:      " OPENAI_API_KEY; echo
+read -s -p "Supabase DB URL:     " SUPABASE_DB_URL; echo
+read -s -p "LinkedIn Client ID:  " LINKEDIN_CLIENT_ID; echo
+read -s -p "LinkedIn Secret:     " LINKEDIN_CLIENT_SECRET; echo
 
-# Create secrets
+# Create the secret
 kubectl create secret generic linkedin-secrets \
-  --from-literal=anthropic-api-key="$ANTHROPIC_API_KEY" \
-  --from-literal=openai-api-key="${OPENAI_API_KEY:-none}" \
+  --from-literal=openai-api-key="$OPENAI_API_KEY" \
   --from-literal=encryption-key="$ENCRYPTION_KEY" \
-  --from-literal=supabase-key="$SUPABASE_KEY" \
-  -n linkedin-automation
+  --from-literal=supabase-db-url="$SUPABASE_DB_URL" \
+  --from-literal=linkedin-client-id="$LINKEDIN_CLIENT_ID" \
+  --from-literal=linkedin-client-secret="$LINKEDIN_CLIENT_SECRET" \
+  -n linkedin-automation \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 # Verify (values should be hidden)
-kubectl get secret linkedin-secrets -n linkedin-automation -o yaml
+kubectl get secret linkedin-secrets -n linkedin-automation
 ```
 
-### Step 5: Configure ConfigMap
+### 7.5 ConfigMap
 
-Edit `configmap.yaml` with your settings:
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: linkedin-config
-  namespace: linkedin-automation
-data:
-  # Supabase
-  SUPABASE_URL: "https://yourproject.supabase.co"
-
-  # LinkedIn OAuth
-  LINKEDIN_CLIENT_ID: "your-client-id"
-  LINKEDIN_CLIENT_SECRET: "your-client-secret"
-  LINKEDIN_REDIRECT_URI: "https://yourdomain.com/auth/linkedin/callback"
-
-  # Redis
-  REDIS_HOST: "redis"
-  REDIS_PORT: "6379"
-  REDIS_DB: "0"
-
-  # API Server
-  API_HOST: "0.0.0.0"
-  API_PORT: "8000"
-  ENVIRONMENT: "production"
-
-  # Logging
-  LOG_LEVEL: "INFO"
-
-  # Features
-  ENABLE_TOKEN_MONITOR: "true"
-
-  # LinkedIn Settings
-  LINKEDIN_HEADLESS: "true"
-  LINKEDIN_BROWSER_TYPE: "playwright"
-
-  # Rate Limiting
-  LINKEDIN_MAX_REQUESTS_PER_WINDOW: "500"
-  LINKEDIN_RATE_LIMIT_WINDOW: "900"
-```
-
-Apply the ConfigMap:
+The `configmap.yaml` embeds `config.json` directly. Review and edit the values — specifically
+`target_industries` and `target_keywords` — before applying:
 
 ```bash
-kubectl apply -f configmap.yaml
+# Review what's in the ConfigMap
+cat deployment/kubernetes/configmap.yaml
+
+# Apply
+kubectl apply -f deployment/kubernetes/configmap.yaml
 
 # Verify
-kubectl get configmap linkedin-config -n linkedin-automation
+kubectl get configmap linkedin-config -n linkedin-automation -o yaml
 ```
 
-### Step 6: Deploy Redis
+### 7.6 Deploy Redis
+
+> **Note:** Redis is deployed as a `Deployment` (not a StatefulSet) in the current manifests.
+> This means Redis pod names are not predictable. Use the label selector to access Redis pods.
 
 ```bash
-# Deploy Redis StatefulSet
-kubectl apply -f redis.yaml
+kubectl apply -f deployment/kubernetes/redis.yaml
 
-# Wait for Redis to be ready
-kubectl wait --for=condition=ready pod -l app=redis -n linkedin-automation --timeout=300s
+# Wait for Redis to be Ready (up to 2 minutes)
+kubectl wait --for=condition=available deployment/redis \
+  -n linkedin-automation --timeout=120s
 
-# Verify
-kubectl get pods -n linkedin-automation | grep redis
+# Find the Redis pod name (it has a random suffix)
+REDIS_POD=$(kubectl get pods -n linkedin-automation -l app=redis -o jsonpath='{.items[0].metadata.name}')
+echo "Redis pod: $REDIS_POD"
 
-# Test Redis connectivity
-kubectl exec -it redis-0 -n linkedin-automation -- redis-cli ping
-# Should return: PONG
+# Verify Redis is responding
+kubectl exec -n linkedin-automation "$REDIS_POD" -- redis-cli ping
+# Expected: PONG
 ```
 
-### Step 7: Deploy Orchestrator
+### 7.7 Deploy the Orchestrator
 
 ```bash
-# Deploy orchestrator
-kubectl apply -f orchestrator.yaml
+kubectl apply -f deployment/kubernetes/orchestrator.yaml
 
-# Wait for orchestrator
-kubectl wait --for=condition=available deployment/linkedin-orchestrator -n linkedin-automation --timeout=300s
+# The orchestrator has HTTP health probes on /health and /ready
+# Wait for it to be available (up to 5 minutes — needs to pull image and initialize)
+kubectl wait --for=condition=available deployment/linkedin-orchestrator \
+  -n linkedin-automation --timeout=300s
 
-# Check logs
+# Stream logs
 kubectl logs -f deployment/linkedin-orchestrator -n linkedin-automation
-
-# Look for:
-# - "Orchestrator initialized successfully"
-# - "Connected to Redis"
-# - No error messages
 ```
 
-### Step 8: Deploy Agents
-
-Before deploying, review and customize `agents.yaml` for your scale needs:
-
-```yaml
-# Example: Scale content-analyzer to 3 replicas
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: content-analyzer
-  namespace: linkedin-automation
-spec:
-  replicas: 3  # Adjust based on load
-  # ...
-```
-
-Deploy agents:
+### 7.8 Deploy Agents
 
 ```bash
-# Deploy all agents
-kubectl apply -f agents.yaml
+kubectl apply -f deployment/kubernetes/agents.yaml
 
-# Wait for agents to be ready
-kubectl wait --for=condition=available deployment --all -n linkedin-automation --timeout=600s
+# Wait for all deployments to be available
+kubectl wait --for=condition=available deployment --all \
+  -n linkedin-automation --timeout=600s
 
-# Verify all deployments
+# Check all deployments
 kubectl get deployments -n linkedin-automation
-
-# Expected output:
-# NAME                      READY   UP-TO-DATE   AVAILABLE
-# linkedin-orchestrator     1/1     1            1
-# account-manager           1/1     1            1
-# content-analyzer          3/3     3            3
-# interaction-agent         2/2     2            2
-# conversation-agent        2/2     2            2
-# safety-agent              1/1     1            1
 ```
 
-### Step 9: Create Service & Ingress (Optional)
+Expected state:
 
-For external access, create a LoadBalancer service:
-
-```yaml
-# service-lb.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: linkedin-orchestrator-lb
-  namespace: linkedin-automation
-spec:
-  type: LoadBalancer
-  selector:
-    app: linkedin-orchestrator
-  ports:
-  - port: 80
-    targetPort: 8080
-    protocol: TCP
+```
+NAME                    READY   UP-TO-DATE   AVAILABLE
+redis                   1/1     1            1
+linkedin-orchestrator   1/1     1            1
+account-manager         1/1     1            1
+content-analyzer        2/2     2            2
+interaction-agent       2/2     2            2
+conversation-agent      2/2     2            2
+safety-agent            1/1     1            1
+scheduler-agent         1/1     1            1
+analytics-agent         1/1     1            1
 ```
 
-Apply:
+### 7.9 Local Access (Port Forward)
 
 ```bash
-kubectl apply -f service-lb.yaml
+# Access the orchestrator API locally
+kubectl port-forward service/linkedin-orchestrator 8080:80 -n linkedin-automation &
 
-# Get external IP (may take a few minutes)
-kubectl get svc linkedin-orchestrator-lb -n linkedin-automation -w
-
-# Or use Ingress for more control (example with nginx-ingress)
+# Test the health endpoint
+curl http://localhost:8080/health
 ```
 
-### Step 10: Configure Horizontal Pod Autoscaler
+### 7.10 Horizontal Pod Autoscaling
+
+Apply HPA for agents that benefit from scaling:
 
 ```yaml
-# hpa.yaml
+# Save as deployment/kubernetes/hpa.yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -1041,7 +705,7 @@ spec:
     kind: Deployment
     name: content-analyzer
   minReplicas: 2
-  maxReplicas: 10
+  maxReplicas: 8
   metrics:
   - type: Resource
     resource:
@@ -1049,1964 +713,1012 @@ spec:
       target:
         type: Utilization
         averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: interaction-agent-hpa
+  namespace: linkedin-automation
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: interaction-agent
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
   - type: Resource
     resource:
-      name: memory
+      name: cpu
       target:
         type: Utilization
-        averageUtilization: 80
+        averageUtilization: 70
 ```
 
-Apply:
-
 ```bash
-kubectl apply -f hpa.yaml
-
-# Verify
+kubectl apply -f deployment/kubernetes/hpa.yaml
 kubectl get hpa -n linkedin-automation
 ```
 
-### Kubernetes Management Commands
+### 7.11 Kubernetes Operations
 
 ```bash
 # View all resources
 kubectl get all -n linkedin-automation
 
-# View logs
-kubectl logs -f deployment/linkedin-orchestrator -n linkedin-automation
+# Tail logs for a deployment
+kubectl logs -f deployment/content-analyzer -n linkedin-automation
 
-# View logs for specific pod
-kubectl logs -f <pod-name> -n linkedin-automation
+# Execute a shell in a pod
+kubectl exec -it deployment/linkedin-orchestrator -n linkedin-automation -- bash
 
-# Execute command in pod
-kubectl exec -it <pod-name> -n linkedin-automation -- bash
+# Scale a deployment manually
+kubectl scale deployment content-analyzer --replicas=4 -n linkedin-automation
 
-# Port forward for local access
-kubectl port-forward service/linkedin-orchestrator 8080:80 -n linkedin-automation
-
-# Scale deployment
-kubectl scale deployment content-analyzer --replicas=5 -n linkedin-automation
-
-# Update deployment (after image change)
-kubectl rollout restart deployment/linkedin-orchestrator -n linkedin-automation
+# Trigger rolling restart (e.g., after updating a ConfigMap)
+kubectl rollout restart deployment --all -n linkedin-automation
 
 # Check rollout status
 kubectl rollout status deployment/linkedin-orchestrator -n linkedin-automation
 
-# View events
-kubectl get events -n linkedin-automation --sort-by='.lastTimestamp'
+# View recent events (sorted by time)
+kubectl get events -n linkedin-automation --sort-by='.lastTimestamp' | tail -20
 
-# View resource usage
+# Resource usage
 kubectl top pods -n linkedin-automation
-kubectl top nodes
 
-# Delete everything
+# Tear down everything
 kubectl delete namespace linkedin-automation
-```
-
-### Kubernetes Troubleshooting
-
-**Pods not starting:**
-```bash
-# Describe pod for detailed info
-kubectl describe pod <pod-name> -n linkedin-automation
-
-# Check events
-kubectl get events -n linkedin-automation
-
-# Common issues:
-# - ImagePullBackOff: Docker image not found
-# - CrashLoopBackOff: Application crashing
-# - Pending: Insufficient resources
-```
-
-**Configuration issues:**
-```bash
-# Verify secrets
-kubectl get secret linkedin-secrets -n linkedin-automation -o yaml
-
-# Verify configmap
-kubectl get configmap linkedin-config -n linkedin-automation -o yaml
-
-# Check environment variables in pod
-kubectl exec -it <pod-name> -n linkedin-automation -- env | grep LINKEDIN
-```
-
-**Storage issues:**
-```bash
-# Check PVC status
-kubectl get pvc -n linkedin-automation
-
-# Describe PVC
-kubectl describe pvc <pvc-name> -n linkedin-automation
-
-# Check StorageClass
-kubectl get storageclass
 ```
 
 ---
 
-## Configuration Guide
+## 8. Configuration Reference
 
-The system uses multiple configuration sources:
+### 8.1 How Configuration Is Loaded
 
-1. **Environment Variables** (.env file or Kubernetes secrets)
-2. **Configuration File** (config/config.json)
-3. **Database** (runtime settings stored in Supabase)
+The system uses this priority order (highest wins):
 
-### Environment Variables Reference
+1. **`config/config.json`** — if the file exists, it is used exclusively
+2. **Environment variables** — used only when `config/config.json` is absent
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SUPABASE_URL` | Yes | - | Supabase project URL |
-| `SUPABASE_KEY` | Yes | - | Supabase service role key |
-| `LINKEDIN_CLIENT_ID` | Yes | - | LinkedIn OAuth client ID |
-| `LINKEDIN_CLIENT_SECRET` | Yes | - | LinkedIn OAuth client secret |
-| `LINKEDIN_REDIRECT_URI` | Yes | - | OAuth redirect URI |
-| `ENCRYPTION_KEY` | Yes | - | Fernet encryption key |
-| `ANTHROPIC_API_KEY` | No* | - | Anthropic Claude API key |
-| `OPENAI_API_KEY` | No* | - | OpenAI GPT API key |
-| `REDIS_HOST` | Yes | localhost | Redis hostname |
-| `REDIS_PORT` | No | 6379 | Redis port |
-| `REDIS_PASSWORD` | No | - | Redis password |
-| `REDIS_DB` | No | 0 | Redis database number |
-| `API_HOST` | No | 0.0.0.0 | API server host |
-| `API_PORT` | No | 8000 | API server port |
-| `ENVIRONMENT` | No | development | Environment (development/production) |
-| `LOG_LEVEL` | No | INFO | Logging level (DEBUG/INFO/WARNING/ERROR) |
-| `FRONTEND_URL` | No | http://localhost:3000 | Frontend URL for CORS |
-| `ENABLE_TOKEN_MONITOR` | No | true | Enable token usage monitoring |
-| `SENTRY_DSN` | No | - | Sentry error tracking DSN |
+In Docker and Kubernetes, the recommended approach is to mount a `config.json`
+(as a volume or ConfigMap). In local development, environment variables are simpler.
 
-*At least one AI API key (Anthropic or OpenAI) is required
+### 8.2 Generating a Baseline Config
 
-### Configuration File Structure
+```bash
+python main.py --create-sample-config
+# Writes: config/sample_config.json
 
-Create `config/config.json`:
+cp config/sample_config.json config/config.json
+```
+
+### 8.3 Complete `config.json` Schema
+
+This schema is derived directly from `src/config/config.py`. Every field name and
+default value matches the source code.
 
 ```json
 {
   "redis": {
     "host": "localhost",
     "port": 6379,
-    "password": null,
-    "db": 0,
-    "max_connections": 50,
-    "socket_timeout": 5,
-    "socket_connect_timeout": 5
+    "password": "",
+    "db": 0
   },
 
   "security": {
-    "session_timeout_minutes": 120,
-    "max_login_attempts": 5,
-    "lockout_duration_minutes": 30,
-    "require_2fa": false,
-    "rate_limit_enabled": true,
-    "max_requests_per_minute": 60
+    "encryption_key_file": ".encryption_key",
+    "max_login_attempts": 3,
+    "session_timeout": 3600,
+    "rate_limit_window": 3600,
+    "enable_2fa": false
   },
 
   "linkedin": {
+    "likes_per_hour": 30,
+    "likes_per_day": 150,
+    "comments_per_hour": 10,
+    "comments_per_day": 50,
+    "shares_per_hour": 5,
+    "shares_per_day": 20,
+    "follows_per_hour": 20,
+    "follows_per_day": 100,
+    "connections_per_hour": 10,
+    "connections_per_day": 50,
+    "like_cooldown": 10,
+    "comment_cooldown": 60,
+    "share_cooldown": 120,
+    "follow_cooldown": 30,
+    "connection_cooldown": 60,
+    "business_hours": [9, 18],
+    "peak_hours": [10, 11, 14, 15],
+    "weekend_activity": 0.3,
+    "random_delay_range": [2, 10],
     "headless": true,
-    "browser_type": "playwright",
-    "user_agent_rotation": true,
-    "proxy_enabled": false,
-
-    "rate_limits": {
-      "likes_per_hour": 30,
-      "likes_per_day": 150,
-      "like_cooldown_seconds": 10,
-
-      "comments_per_hour": 10,
-      "comments_per_day": 50,
-      "comment_cooldown_seconds": 60,
-
-      "shares_per_hour": 5,
-      "shares_per_day": 20,
-      "share_cooldown_seconds": 120,
-
-      "follows_per_hour": 20,
-      "follows_per_day": 100,
-      "follow_cooldown_seconds": 30,
-
-      "connections_per_hour": 10,
-      "connections_per_day": 50,
-      "connection_cooldown_seconds": 60,
-
-      "messages_per_hour": 10,
-      "messages_per_day": 50,
-      "message_cooldown_seconds": 120
-    },
-
-    "timing": {
-      "business_hours_start": 9,
-      "business_hours_end": 18,
-      "peak_hours": [10, 11, 14, 15],
-      "weekend_activity_multiplier": 0.3,
-      "random_delay_min_seconds": 2,
-      "random_delay_max_seconds": 10
-    },
-
-    "interaction": {
-      "priority_levels": 10,
-      "max_retries": 3,
-      "retry_delay_seconds": 300,
-      "queue_check_interval_seconds": 5
-    }
+    "browser_type": "playwright"
   },
 
   "content_analysis": {
-    "model": "openai",
-    "enable_embeddings": true,
-    "embedding_model": "text-embedding-ada-002",
-
-    "scoring": {
-      "min_relevance_score": 0.5,
-      "min_quality_score": 0.6,
-      "min_engagement_probability": 0.4
-    },
-
-    "filters": {
-      "target_industries": [
-        "technology",
-        "software",
-        "artificial intelligence",
-        "data science",
-        "finance",
-        "consulting"
-      ],
-      "target_keywords": [
-        "AI",
-        "machine learning",
-        "innovation",
-        "automation",
-        "digital transformation",
-        "leadership"
-      ],
-      "excluded_keywords": [
-        "spam",
-        "bitcoin",
-        "crypto",
-        "investment opportunity"
-      ],
-      "min_content_length": 50,
-      "max_content_length": 3000
-    },
-
-    "nlp": {
-      "spacy_model": "en_core_web_sm",
-      "sentiment_threshold": -0.2,
-      "enable_entity_extraction": true,
-      "enable_topic_classification": true
-    }
+    "openai_api_key": "",
+    "use_local_models": false,
+    "model_name": "gpt-3.5-turbo",
+    "cache_ttl": 3600,
+    "min_relevance_score": 0.5,
+    "min_quality_score": 0.4,
+    "target_industries": ["technology", "finance", "healthcare"],
+    "target_keywords": ["AI", "machine learning", "innovation"],
+    "excluded_keywords": ["politics", "controversial"]
   },
 
   "conversation": {
-    "model": "anthropic",
-    "model_name": "claude-3-5-sonnet-20241022",
-    "temperature": 0.7,
-    "max_tokens": 150,
-
-    "generation": {
-      "min_confidence_score": 0.7,
-      "generate_alternatives": true,
-      "max_alternatives": 3,
-      "diversity_threshold": 0.3
-    },
-
-    "styles": {
-      "default": "professional",
-      "available": [
-        "professional",
-        "casual",
-        "friendly",
-        "thought_leader",
-        "technical",
-        "inspirational",
-        "analytical"
-      ]
-    },
-
-    "tones": {
-      "default": "positive",
-      "available": [
-        "positive",
-        "neutral",
-        "supportive",
-        "inquisitive",
-        "agreeable",
-        "challenging"
-      ]
-    },
-
-    "constraints": {
-      "min_length": 20,
-      "max_length": 300,
-      "avoid_generic_phrases": true,
-      "require_personalization": true
-    }
+    "openai_api_key": "",
+    "use_local_models": false,
+    "model_name": "gpt-3.5-turbo",
+    "cache_ttl": 3600,
+    "min_confidence_score": 0.7,
+    "min_quality_score": 0.6,
+    "min_relevance_score": 0.6,
+    "max_alternatives": 3,
+    "diversity_threshold": 0.8
   },
 
-  "safety": {
-    "bot_detection_threshold": 0.8,
-    "rate_limit_buffer": 0.8,
-    "action_threshold_per_hour": 100,
-    "action_threshold_per_day": 500,
-    "suspicious_activity_threshold": 0.8,
-    "cooldown_duration_seconds": 300,
-    "enable_captcha_detection": true,
-    "enable_behavior_analysis": true
-  },
-
-  "monitoring": {
-    "enable_prometheus": true,
-    "prometheus_port": 9090,
-    "enable_health_checks": true,
-    "health_check_interval_seconds": 60,
-    "enable_performance_tracking": true,
-    "enable_error_tracking": true
-  },
-
-  "database": {
-    "pool_size": 20,
-    "max_overflow": 10,
-    "pool_timeout": 30,
-    "pool_recycle": 3600,
-    "echo": false
-  }
+  "log_level": "INFO",
+  "max_workers": 10,
+  "health_check_interval": 30
 }
 ```
 
-### Configuration Best Practices
+> **Important:** The `openai_api_key` fields in `content_analysis` and `conversation`
+> will be overwritten at runtime by the `OPENAI_API_KEY` environment variable when
+> using `SystemConfig.from_env()`. If you use a `config.json`, populate those fields
+> directly or they will remain empty.
 
-1. **Start Conservative**: Use default rate limits and increase gradually
-2. **Monitor First**: Run with monitoring enabled for first few days
-3. **Test in Stages**: Test with 1-2 accounts before scaling
-4. **Adjust Based on Results**: Tune based on LinkedIn's response
-5. **Keep Backups**: Always backup working configurations
+### 8.4 Environment Variables Reference
 
-### Environment-Specific Configs
+Only these variables are read by `src/config/config.py`'s `from_env()` method:
 
-**Development:**
+| Variable | Used By | Default | Notes |
+|---|---|---|---|
+| `REDIS_HOST` | `config.py` | `localhost` | Use `redis` in Docker |
+| `REDIS_PORT` | `config.py` | `6379` | |
+| `REDIS_PASSWORD` | `config.py` | `""` | |
+| `REDIS_DB` | `config.py` | `0` | |
+| `OPENAI_API_KEY` | `config.py` | `""` | Required for AI agents |
+| `LINKEDIN_HEADLESS` | `config.py` | `true` | Set `false` to debug browser |
+| `LINKEDIN_BROWSER_TYPE` | `config.py` | `playwright` | Or `selenium` |
+| `LOG_LEVEL` | `config.py` | `INFO` | `DEBUG` for verbose output |
+| `MAX_WORKERS` | `config.py` | `10` | Concurrent worker limit |
+
+Only these variables are read by `src/database/session.py`:
+
+| Variable | Priority | Notes |
+|---|---|---|
+| `SUPABASE_DB_URL` | 1st | Full PostgreSQL connection string from Supabase pooler |
+| `USE_SQLITE` | 2nd | Set `true` for local testing (not production) |
+| `POSTGRES_USER` | 3rd | Used if neither of the above are set |
+| `POSTGRES_PASSWORD` | 3rd | |
+| `POSTGRES_HOST` | 3rd | |
+| `POSTGRES_PORT` | 3rd | |
+| `POSTGRES_DB` | 3rd | |
+
+Variables in `.env.example` that are **not** currently consumed by Python code:
+
+| Variable | Status |
+|---|---|
+| `SUPABASE_URL` | In `.env.example` but not read by any Python file |
+| `SUPABASE_KEY` | In `.env.example` but not read by any Python file |
+| `ANTHROPIC_API_KEY` | In `.env.example` but `config.py` only reads `OPENAI_API_KEY` |
+| `ENABLE_TOKEN_MONITOR` | In `.env.example` but not wired to any config field |
+| `FRONTEND_URL` | In `.env.example` but not wired to any config field |
+| `SENTRY_DSN` | In `.env.example` but not wired to any config field |
+
+### 8.5 Tuning for Your Scale
+
+**Conservative (starting out — 1–5 accounts):**
+
 ```json
 {
   "linkedin": {
-    "headless": false,
-    "rate_limits": {
-      "likes_per_hour": 5,
-      "comments_per_hour": 2
-    }
+    "likes_per_hour": 10,
+    "likes_per_day": 50,
+    "comments_per_hour": 3,
+    "comments_per_day": 15,
+    "follows_per_hour": 5,
+    "follows_per_day": 20
   },
-  "safety": {
-    "bot_detection_threshold": 0.5
+  "safety": {},
+  "log_level": "DEBUG"
+}
+```
+
+**Standard (stable — 10–20 accounts):**
+
+```json
+{
+  "linkedin": {
+    "likes_per_hour": 30,
+    "likes_per_day": 150,
+    "comments_per_hour": 10,
+    "comments_per_day": 50
   }
 }
 ```
 
-**Staging:**
-```json
-{
-  "linkedin": {
-    "headless": true,
-    "rate_limits": {
-      "likes_per_hour": 15,
-      "comments_per_hour": 5
-    }
-  }
-}
-```
+**Aggressive (validated — 50+ accounts with established safety history):**
 
-**Production:**
-```json
-{
-  "linkedin": {
-    "headless": true,
-    "rate_limits": {
-      "likes_per_hour": 30,
-      "comments_per_hour": 10
-    }
-  },
-  "safety": {
-    "bot_detection_threshold": 0.9,
-    "enable_behavior_analysis": true
-  }
-}
-```
+Only increase limits after several weeks of operation with zero suspensions.
+LinkedIn's anti-automation systems learn account patterns over time.
 
 ---
 
-## Post-Deployment Verification
+## 9. Post-Deployment Verification
 
-### Health Check Procedures
+Run these checks in order. Fix each failure before proceeding to the next.
 
-#### 1. System Health
-
-```bash
-# Docker
-docker-compose ps
-docker-compose exec linkedin-app python -c "
-import asyncio
-import sys
-sys.path.insert(0, 'src')
-from infrastructure.health_check import health_check
-asyncio.run(health_check())
-"
-
-# Kubernetes
-kubectl get pods -n linkedin-automation
-kubectl exec -it deployment/linkedin-orchestrator -n linkedin-automation -- python -c "
-import asyncio
-from infrastructure.health_check import health_check
-asyncio.run(health_check())
-"
-
-# Local
-python -c "
-import asyncio
-import sys
-sys.path.insert(0, 'src')
-from infrastructure.health_check import health_check
-asyncio.run(health_check())
-"
-```
-
-#### 2. Redis Connectivity
+### 9.1 Redis Connectivity
 
 ```bash
 # Docker
 docker-compose exec redis redis-cli ping
 
 # Kubernetes
-kubectl exec -it redis-0 -n linkedin-automation -- redis-cli ping
+REDIS_POD=$(kubectl get pods -n linkedin-automation -l app=redis -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n linkedin-automation "$REDIS_POD" -- redis-cli ping
 
 # Local
 redis-cli ping
+
+# All should return: PONG
 ```
 
-#### 3. Database Connectivity
+### 9.2 Database Connectivity
 
 ```bash
-# Test Supabase connection
-python -c "
-import asyncio
-from src.database.session import get_session
+# Test the database connection string directly
+python3 -c "
+import asyncio, os
+from sqlalchemy.ext.asyncio import create_async_engine
 
 async def test():
-    async with get_session() as session:
-        result = await session.execute('SELECT 1')
-        print('✅ Database connected')
+    url = os.getenv('SUPABASE_DB_URL', '')
+    if not url:
+        print('SUPABASE_DB_URL not set — testing SQLite fallback')
+        url = 'sqlite+aiosqlite:///./test.db'
+    else:
+        url = url.replace('postgresql://', 'postgresql+asyncpg://')
+    engine = create_async_engine(url, connect_args={'statement_cache_size': 0})
+    async with engine.connect() as conn:
+        await conn.execute(__import__('sqlalchemy').text('SELECT 1'))
+    print('Database connection: OK')
+    await engine.dispose()
 
 asyncio.run(test())
 "
 ```
 
-#### 4. Agent Status
+### 9.3 System Health Check
 
 ```bash
-# Check agent health
-redis-cli
-> KEYS agent:*:health
-> GET agent:account_manager:health
-> GET agent:content_analyzer:health
-```
-
-#### 5. API Endpoints
-
-```bash
-# Health endpoint
-curl http://localhost:8080/health
-
-# Expected response:
-# {"status": "healthy", "agents": [...], "timestamp": "..."}
-
-# Readiness endpoint
-curl http://localhost:8080/ready
-```
-
-### Functional Testing
-
-#### Test 1: Add Test Account (Manual)
-
-Use the web dashboard or API to add a test LinkedIn account and verify:
-- [ ] Account successfully added
-- [ ] Credentials encrypted in database
-- [ ] Session created and stored
-- [ ] Account appears in account list
-
-#### Test 2: Content Analysis
-
-```python
-# Test content analyzer
+# Docker (exec into the main container by service name)
+docker-compose exec linkedin-app python -c "
 import asyncio
-from src.agents.core.content_analysis_agent import ContentAnalysisAgent
+from src.infrastructure.health_check import health_check
+asyncio.run(health_check())
+"
 
-async def test():
-    agent = ContentAnalysisAgent()
-    await agent.initialize()
-
-    result = await agent.analyze_content(
-        content_text="Exciting developments in AI and machine learning...",
-        content_type="post"
-    )
-
-    print(f"Relevance: {result.relevance_score}")
-    print(f"Quality: {result.quality_score}")
-    print(f"Sentiment: {result.sentiment_score}")
-
-asyncio.run(test())
-```
-
-Expected:
-- [ ] Content analyzed successfully
-- [ ] Scores returned (0-1 range)
-- [ ] Industries/topics identified
-
-#### Test 3: Comment Generation
-
-```python
-# Test conversation agent
+# Kubernetes
+kubectl exec -it deployment/linkedin-orchestrator -n linkedin-automation -- python -c "
 import asyncio
-from src.agents.core.conversation_agent import ConversationAgent
+from src.infrastructure.health_check import health_check
+asyncio.run(health_check())
+"
 
-async def test():
-    agent = ConversationAgent()
-    await agent.initialize()
-
-    result = await agent.generate_comment(
-        content_text="Just published an article on AI ethics...",
-        content_author="John Doe",
-        style="professional"
-    )
-
-    print(f"Generated: {result.comment_text}")
-    print(f"Confidence: {result.confidence_score}")
-## Quick Start (Development)
-
-```bash
-# 1. Start Backend
-cd /path/to/linkedin-multi-agent-system
-python src/api/main_simple_integrated.py
-
-# 2. Start Frontend  
-cd frontend-new
-npm start
-
-# 3. Access System
-# Frontend: http://localhost:3000
-# Backend API: http://localhost:8000
-# API Docs: http://localhost:8000/docs
-```
-
-## Production Deployment
-
-### Option 1: Docker Deployment (Recommended)
-
-```dockerfile
-# Dockerfile for backend
-FROM python:3.11-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-RUN playwright install
-
-COPY src/ ./src/
-EXPOSE 8000
-CMD ["python", "src/api/main_simple_integrated.py"]
-```
-
-```dockerfile  
-# Dockerfile for frontend
-FROM node:18-alpine
-
-WORKDIR /app
-COPY frontend-new/package*.json ./
-RUN npm install
-
-COPY frontend-new/ .
-RUN npm run build
-EXPOSE 3000
-CMD ["npm", "start"]
-```
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-services:
-  backend:
-    build: .
-    ports:
-      - "8000:8000"
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - REDIS_URL=${REDIS_URL}
-    volumes:
-      - ./data:/app/data
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend
-    ports:
-      - "3000:3000"
-    depends_on:
-      - backend
-
-  redis:
-    image: redis:alpine
-    ports:
-      - "6379:6379"
-```
-
-### Option 2: Manual Server Deployment
-
-#### Backend Setup:
-```bash
-# Install Python dependencies
-pip install fastapi uvicorn playwright openai beautifulsoup4 aioredis
-
-# Install browser
-playwright install
-
-# Set environment variables
-export OPENAI_API_KEY=your_openai_api_key
-export REDIS_URL=redis://localhost:6379
-
-# Run with production server
-uvicorn src.api.main_simple_integrated:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-#### Frontend Setup:
-```bash
-cd frontend-new
-
-# Install dependencies
-npm install
-
-# Build for production
-npm run build
-
-# Serve with production server
-npm install -g serve
-serve -s build -l 3000
-```
-
-### Option 3: Kubernetes Deployment (Production Scale)
-
-For production-scale deployment, use the pre-configured Kubernetes manifests in `deployment/kubernetes/`:
-
-```bash
-# 1. Create namespace
-kubectl apply -f deployment/kubernetes/namespace.yaml
-
-# 2. Create ConfigMap and Secrets (edit with your values first)
-kubectl apply -f deployment/kubernetes/configmap.yaml
-
-# 3. Deploy Redis
-kubectl apply -f deployment/kubernetes/redis.yaml
-
-# 4. Deploy orchestrator
-kubectl apply -f deployment/kubernetes/orchestrator.yaml
-
-# 5. Deploy agents (Content Analyzer, Interaction Agent, etc.)
-kubectl apply -f deployment/kubernetes/agents.yaml
-
-# 6. Verify deployment
-kubectl get pods -n linkedin-automation
-
-# 7. Check logs
-kubectl logs -f deployment/linkedin-orchestrator -n linkedin-automation
-```
-
-**Agent Scaling (agents.yaml):**
-| Agent | Default Replicas | Memory |
-|-------|------------------|--------|
-| Account Manager | 1 | 512Mi-1Gi |
-| Content Analyzer | 2 | 1Gi-2Gi |
-| Interaction Agent | 2 | 512Mi-1Gi |
-| Conversation Agent | 2 | 1Gi-2Gi |
-| Safety Agent | 1 | 256Mi-512Mi |
-
-**Using Production Scripts:**
-```bash
-# Automated deployment with validation
-./scripts/deploy.sh kubernetes
-
-# Or use the production deployment script
-./scripts/deploy_production.sh
-```
-
-## Configuration
-
-### Environment Variables:
-```bash
-# Required
-OPENAI_API_KEY=sk-your-openai-api-key-here
-
-# Optional
-REDIS_URL=redis://localhost:6379
-LOG_LEVEL=INFO
-MAX_DAILY_POSTS=50
-COMMENT_PROBABILITY=0.4
-HEADLESS_BROWSER=true
-```
-
-### Backend Configuration:
-Edit `src/api/main_simple_integrated.py`:
-```python
-# Modify these settings for production
-automation_config = {
-    "enabled": False,  # Start disabled for safety
-    "max_posts_per_day": 50,  # Adjust based on your needs
-    "comment_probability": 0.4,  # 40% chance to comment
-    "reply_probability": 0.2,   # 20% chance to reply
-    "min_delay_minutes": 5,     # Minimum delay between actions
-    "max_delay_minutes": 30,    # Maximum delay between actions
-    "risk_management_enabled": True,  # Keep enabled
-    "ai_enabled": True,  # Enable once OpenAI key is set
-}
-```
-
-### Supabase Database Configuration
-
-This project uses Supabase as the primary database via the Supavisor connection pooler.
-
-**Connection String Format (Transaction Mode - Port 6543):**
-```
-postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-1-[REGION].pooler.supabase.com:6543/postgres
-```
-
-**Finding Your Supabase Region:**
-1. Go to [Supabase Dashboard](https://supabase.com/dashboard)
-2. Select your project → Settings → Database
-3. Find your region (e.g., `ap-southeast-2`, `us-east-1`, `eu-west-1`)
-4. Copy the **Transaction mode** pooler URL (port 6543)
-
-**Example Connection Strings by Region:**
-```bash
-# Australia (ap-southeast-2)
-SUPABASE_DB_URL=postgresql://postgres.yourproject:password@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres
-
-# US East (us-east-1)
-SUPABASE_DB_URL=postgresql://postgres.yourproject:password@aws-1-us-east-1.pooler.supabase.com:6543/postgres
-
-# Europe (eu-west-1)
-SUPABASE_DB_URL=postgresql://postgres.yourproject:password@aws-1-eu-west-1.pooler.supabase.com:6543/postgres
-```
-
-**Required in `.env`:**
-```bash
-SUPABASE_DB_URL=postgresql://postgres.[PROJECT_REF]:[PASSWORD]@aws-1-[REGION].pooler.supabase.com:6543/postgres
-```
-
-**SQLAlchemy Configuration (already configured in `src/database/session.py`):**
-```python
-# Required for Supabase pooler - disables prepared statement caching
-connect_args = {
-    "statement_cache_size": 0,
-    "prepared_statement_cache_size": 0,
-}
-```
-
-**Test Connection:**
-```python
+# Local (run from the repo root)
+python -c "
 import asyncio
-import asyncpg
-
-async def test():
-    conn = await asyncpg.connect(
-        "YOUR_SUPABASE_DB_URL",
-        statement_cache_size=0
-    )
-    result = await conn.fetchval('SELECT NOW()')
-    print(f'✅ Connected: {result}')
-    await conn.close()
-
-asyncio.run(test())
+from src.infrastructure.health_check import health_check
+asyncio.run(health_check())
+"
 ```
 
-Expected:
-- [ ] Comment generated successfully
-- [ ] Relevant to content
-- [ ] Meets quality thresholds
+Expected output format:
 
-### Performance Benchmarks
+```
+System Status: HEALTHY
+Timestamp: 2025-05-12T10:30:00.000000
 
-After deployment, verify performance meets expectations:
+Summary:
+  Total Checks: 6
+  Healthy: 6
+  Degraded: 0
+  Unhealthy: 0
 
-| Metric | Target | Acceptance Criteria |
-|--------|--------|---------------------|
-| System startup time | < 60 seconds | All agents initialized |
-| Agent response time | < 2 seconds | For standard requests |
-| Content analysis time | < 5 seconds | Per post |
-| Comment generation time | < 10 seconds | Per comment |
-| Database query time | < 100ms | For simple queries |
-| Redis operations | < 10ms | For gets/sets |
-| Memory usage | < 2GB | Per agent container |
-| CPU usage | < 50% | At steady state |
-
-### Monitoring Setup Verification
-
-If monitoring is enabled, verify:
-
-- [ ] Prometheus accessible at http://localhost:9090
-- [ ] Grafana accessible at http://localhost:3000
-- [ ] Metrics being collected (check Prometheus targets)
-- [ ] Dashboards displaying data in Grafana
-- [ ] Alerts configured (if applicable)
-
----
-
-## Security Hardening
-
-### Production Security Checklist
-
-#### Infrastructure Security
-
-- [ ] **Use HTTPS only**: Configure SSL/TLS certificates
-- [ ] **Firewall rules**: Restrict access to necessary ports only
-- [ ] **Network segmentation**: Isolate database, Redis, and application
-- [ ] **VPN/Private network**: Run in private network where possible
-- [ ] **DDoS protection**: Use CloudFlare or similar
-- [ ] **Regular updates**: Keep all software updated
-
-#### Application Security
-
-- [ ] **Strong encryption keys**: Use 256-bit keys minimum
-- [ ] **Rotate secrets**: Implement secret rotation policy
-- [ ] **Secure storage**: Never commit secrets to git
-- [ ] **Rate limiting**: Enable application-level rate limiting
-- [ ] **Input validation**: Validate all user inputs
-- [ ] **SQL injection protection**: Use parameterized queries
-- [ ] **XSS protection**: Sanitize outputs
-- [ ] **CSRF protection**: Implement CSRF tokens
-
-#### LinkedIn Account Security
-
-- [ ] **2FA enabled**: Enable on all LinkedIn accounts
-- [ ] **Unique passwords**: Use different password per account
-- [ ] **Password rotation**: Rotate passwords every 90 days
-- [ ] **Monitor logins**: Watch for suspicious login attempts
-- [ ] **IP whitelisting**: Use consistent IPs where possible
-- [ ] **Proxy rotation**: Use residential proxies for anonymity
-
-#### Database Security
-
-- [ ] **Row-level security**: Enable RLS in Supabase
-- [ ] **Encryption at rest**: Enabled by default in Supabase
-- [ ] **Encryption in transit**: Use SSL connections
-- [ ] **Backup encryption**: Encrypt backups
-- [ ] **Access control**: Restrict database access
-- [ ] **Audit logging**: Enable database audit logs
-
-#### Redis Security
-
-- [ ] **Password protection**: Set Redis password
-- [ ] **Disable dangerous commands**: Disable FLUSHALL, KEYS, etc.
-- [ ] **Bind to localhost**: Only expose to trusted networks
-- [ ] **Use Redis ACLs**: Configure user permissions (Redis 6+)
-- [ ] **Enable persistence**: Configure RDB/AOF for data durability
-
-### Kubernetes-Specific Security
-
-```yaml
-# Security best practices for pods
-apiVersion: v1
-kind: Pod
-metadata:
-  name: secure-pod
-spec:
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    fsGroup: 1000
-    seccompProfile:
-      type: RuntimeDefault
-
-  containers:
-  - name: app
-    securityContext:
-      allowPrivilegeEscalation: false
-      readOnlyRootFilesystem: true
-      capabilities:
-        drop:
-        - ALL
-
-    resources:
-      limits:
-        memory: "2Gi"
-        cpu: "1000m"
-      requests:
-        memory: "1Gi"
-        cpu: "500m"
+Individual Checks:
+  ✅ redis: healthy
+  ✅ agent_account_manager: healthy
+  ✅ agent_content_analysis: healthy
+  ✅ agent_interaction: healthy
+  ✅ agent_conversation: healthy
+  ✅ agent_safety: healthy
 ```
 
-Apply network policies:
+### 9.4 Agent Heartbeat Verification via Redis
 
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: linkedin-network-policy
-  namespace: linkedin-automation
-spec:
-  podSelector: {}
-  policyTypes:
-  - Ingress
-  - Egress
+Agents publish heartbeats every 10 seconds. If an agent is running, its heartbeat key
+will exist in Redis with a 30-second TTL.
 
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          name: linkedin-automation
+```bash
+# Docker
+docker-compose exec redis redis-cli keys "heartbeat:*"
 
-  egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          name: linkedin-automation
-  - to:  # Allow external API calls
-    - namespaceSelector: {}
-    ports:
-    - protocol: TCP
-      port: 443
+# Kubernetes
+kubectl exec -n linkedin-automation "$REDIS_POD" -- redis-cli keys "heartbeat:*"
 ```
 
-### Secrets Management
-
-**Never commit these to git:**
-- API keys
-- Passwords
-- Encryption keys
-- OAuth secrets
-- Database credentials
-
-**Use:**
-- Environment variables
-- Kubernetes secrets
-- Secret management services (AWS Secrets Manager, HashiCorp Vault)
-- Encrypted env files
-
-**Example .gitignore:**
+Each running agent should appear:
 ```
-.env
-.env.local
-.env.production
-config/secrets.json
-*.pem
-*.key
-*.cert
+heartbeat:account_manager_1234567890.123
+heartbeat:content_analysis_1234567890.456
+...
+```
+
+Inspect a specific heartbeat:
+
+```bash
+docker-compose exec redis redis-cli get "heartbeat:account_manager_1234567890.123"
+# Returns JSON: {"agent_id": "...", "state": "ready", "timestamp": "...", "health_metrics": {...}}
+```
+
+### 9.5 Validate Configuration Parsing
+
+```bash
+# Confirm config.json is loading correctly
+python main.py --dry-run
+
+# Expected output (exactly):
+# Configuration validation passed
+
+# If it prints "Configuration errors:", fix those before proceeding
+```
+
+### 9.6 API Endpoint Smoke Test
+
+```bash
+# Health check endpoint
+curl -s http://localhost:8080/health | python3 -m json.tool
+
+# Campaign API (if the FastAPI server is running)
+curl -s http://localhost:8000/api/v1/campaigns | python3 -m json.tool
 ```
 
 ---
 
-## Monitoring & Maintenance
+## 10. Monitoring Setup
 
-### Daily Checks
+### 10.1 What Is Available Today
 
-- [ ] Check agent health status
-- [ ] Review error logs for anomalies
-- [ ] Monitor rate limit consumption
-- [ ] Check account status (not locked/suspended)
-- [ ] Verify interactions completing successfully
+| Method | Available | How |
+|---|---|---|
+| Structured JSON logs | ✅ Yes | `docker-compose logs -f` |
+| Redis state inspection | ✅ Yes | `redis-cli` commands below |
+| Agent heartbeats | ✅ Yes | `redis-cli keys "heartbeat:*"` |
+| Orchestrator metrics | ✅ Yes | `redis-cli hgetall orchestrator:metrics` |
+| HTTP `/health` endpoint | ✅ Yes | `curl localhost:8080/health` |
+| Prometheus metrics | ⚠️ Placeholder | Not yet implemented |
+| Grafana dashboards | ⚠️ Placeholder | Requires Prometheus to be working |
 
-### Weekly Maintenance
+### 10.2 Key Redis Inspection Commands
 
-- [ ] Review performance metrics
-- [ ] Analyze success/failure rates
-- [ ] Check disk space usage
-- [ ] Review and archive old logs
-- [ ] Update configuration based on performance
-- [ ] Review security alerts
-
-### Monthly Maintenance
-
-- [ ] Update dependencies
-- [ ] Review and optimize database
-- [ ] Backup configuration and data
-- [ ] Security audit
-- [ ] Performance tuning
-- [ ] Review and update documentation
-
-### Monitoring Dashboards
-
-#### Prometheus Queries
-
-```promql
-# Agent health
-up{job="linkedin-agents"}
-
-# Request rate
-rate(linkedin_interactions_total[5m])
-
-# Error rate
-rate(linkedin_errors_total[5m]) / rate(linkedin_interactions_total[5m])
-
-# Queue depth
-linkedin_queue_depth
-
-# Response time
-histogram_quantile(0.95, rate(linkedin_response_time_bucket[5m]))
-```
-
-#### Grafana Dashboard Panels
-
-1. **System Overview**
-   - Total agents running
-   - System uptime
-   - Error rate
-   - Request rate
-
-2. **Agent Performance**
-   - Agent health status
-   - Message processing rate
-   - Queue depths
-   - Response times
-
-3. **LinkedIn Metrics**
-   - Interactions by type
-   - Success/failure rates
-   - Rate limit usage
-   - Account status
-
-4. **Infrastructure**
-   - CPU usage
-   - Memory usage
-   - Disk I/O
-   - Network traffic
-
-### Log Management
-
-#### Log Locations
-
-**Docker:**
 ```bash
-docker-compose logs linkedin-app > logs/app.log
-docker-compose logs content-analyzer > logs/content-analyzer.log
+# (run inside redis container or with redis-cli)
+
+# All registered agents
+redis-cli keys "agents:*"
+
+# Orchestrator health metrics
+redis-cli hgetall orchestrator:metrics
+
+# Rate limit status for an account
+redis-cli keys "rate_limit:*"
+
+# Message queues depth
+redis-cli llen "queue:interaction"
+redis-cli llen "queue:content_analysis"
+
+# Agent state
+redis-cli keys "state:*"
+
+# Watch all keys being written in real time (warning: noisy in production)
+redis-cli monitor
 ```
 
-**Kubernetes:**
+### 10.3 Log-Based Monitoring
+
+All components use `structlog` with JSON output. In production, pipe logs to a
+collector (Datadog, CloudWatch, Loki):
+
 ```bash
-kubectl logs deployment/linkedin-orchestrator -n linkedin-automation > logs/orchestrator.log
+# Docker — stream logs to a file
+docker-compose logs -f --no-color >> /var/log/linkedin-automation.log &
+
+# Search logs for errors
+docker-compose logs | grep '"level":"error"' | python3 -m json.tool
+
+# Watch error rate in real time
+docker-compose logs -f | grep --line-buffered '"level":"error"'
 ```
 
-**Local:**
-```bash
-# Logs are written to stdout and logs/ directory
-tail -f logs/linkedin-automation.log
-```
+### 10.4 Log Rotation
 
-#### Log Rotation
-
-Configure log rotation to prevent disk space issues:
+Prevent disk exhaustion in long-running deployments:
 
 ```bash
 # /etc/logrotate.d/linkedin-automation
-/var/log/linkedin-automation/*.log {
+/var/log/linkedin-automation.log {
     daily
-    rotate 30
+    rotate 14
     compress
     delaycompress
     notifempty
-    create 0644 app app
-    sharedscripts
-    postrotate
-        docker-compose restart linkedin-app
-    endscript
+    missingok
+    create 0644 root root
 }
-```
-
-#### Centralized Logging (Optional)
-
-Consider using ELK Stack or similar:
-
-```yaml
-# docker-compose.yml addition
-services:
-  elasticsearch:
-    image: elasticsearch:8.5.0
-    environment:
-      - discovery.type=single-node
-    volumes:
-      - es_data:/usr/share/elasticsearch/data
-
-  kibana:
-    image: kibana:8.5.0
-    ports:
-      - "5601:5601"
-    depends_on:
-      - elasticsearch
-
-  filebeat:
-    image: elastic/filebeat:8.5.0
-    volumes:
-      - ./filebeat.yml:/usr/share/filebeat/filebeat.yml
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-    depends_on:
-      - elasticsearch
-```
-
-### Backup Strategy
-
-#### What to Backup
-
-1. **Database** (Supabase handles this automatically)
-   - Supabase provides automatic daily backups
-   - Can trigger manual backups via dashboard
-   - Consider exporting critical tables weekly
-
-2. **Configuration Files**
-   ```bash
-   # Backup script
-   tar -czf backup-$(date +%Y%m%d).tar.gz \
-     .env \
-     config/ \
-     deployment/
-   ```
-
-3. **Redis Data** (if persistence enabled)
-   ```bash
-   # Redis backup
-   redis-cli SAVE
-   cp /var/lib/redis/dump.rdb backup/dump-$(date +%Y%m%d).rdb
-   ```
-
-4. **Logs** (for audit purposes)
-   ```bash
-   # Archive old logs
-   tar -czf logs-$(date +%Y%m).tar.gz logs/
-   mv logs-$(date +%Y%m).tar.gz archive/
-   ```
-
-#### Backup Schedule
-
-- **Configuration**: After every change
-- **Database**: Daily (automated by Supabase)
-- **Redis**: Daily (if using persistence)
-- **Logs**: Weekly
-- **Full system**: Weekly
-
-#### Restore Procedures
-
-**Configuration:**
-```bash
-tar -xzf backup-20250101.tar.gz
-cp .env.backup .env
-cp -r config.backup/ config/
-```
-
-**Database:**
-Use Supabase dashboard to restore from snapshot
-
-**Redis:**
-```bash
-cp backup/dump-20250101.rdb /var/lib/redis/dump.rdb
-redis-cli SHUTDOWN SAVE
-redis-server
 ```
 
 ---
 
-## Troubleshooting
+## 11. Operational Runbook
 
-### Common Issues
+### 11.1 Deploying a Config Change
 
-#### Issue: Services won't start
+**Docker:**
 
-**Symptoms:**
-- Containers exit immediately
-- Agents fail to initialize
-- Connection errors
-
-**Diagnosis:**
 ```bash
-# Check logs
-docker-compose logs
-kubectl logs <pod-name> -n linkedin-automation
+# Edit config/config.json
+# Then restart only the affected service
+docker-compose restart linkedin-app
 
-# Common errors:
-# - "Connection refused" → Service not running
-# - "Authentication failed" → Wrong credentials
-# - "Module not found" → Missing dependencies
+# Or restart all agents
+docker-compose restart
 ```
 
-**Solutions:**
-1. Verify environment variables
-2. Check Redis/database connectivity
-3. Verify all required secrets exist
-4. Check firewall/network rules
-5. Review resource limits
-
-#### Issue: High memory usage
-
-**Symptoms:**
-- OOM (Out of Memory) kills
-- Slow performance
-- Container restarts
-
-**Diagnosis:**
-```bash
-# Check memory usage
-docker stats
-kubectl top pods -n linkedin-automation
-
-# Check memory limits
-docker-compose config
-kubectl describe pod <pod-name> -n linkedin-automation
-```
-
-**Solutions:**
-1. Increase memory limits
-2. Reduce agent instances
-3. Enable garbage collection tuning
-4. Review for memory leaks
-5. Consider using local models instead of API calls (reduces memory for caching)
-
-#### Issue: Rate limiting triggered
-
-**Symptoms:**
-- Many "rate limited" errors
-- Interactions queued but not executing
-- Cooldown messages in logs
-
-**Diagnosis:**
-```bash
-# Check rate limit status
-redis-cli
-> KEYS rate_limit:*
-> GET rate_limit:account:123:likes
-
-# Check safety agent logs
-docker-compose logs safety-agent
-```
-
-**Solutions:**
-1. Reduce rate limits in config
-2. Add more accounts for rotation
-3. Increase cooldown periods
-4. Review LinkedIn's current limits
-5. Check if account is flagged/restricted
-
-#### Issue: LinkedIn login failures
-
-**Symptoms:**
-- "Authentication failed" errors
-- Accounts marked as inactive
-- CAPTCHA errors
-
-**Diagnosis:**
-```bash
-# Check account status
-redis-cli
-> GET account:123:status
-
-# Check logs for specific error
-docker-compose logs account-manager | grep -i "auth"
-```
-
-**Solutions:**
-1. Verify credentials are correct
-2. Check if 2FA is enabled (handle separately)
-3. Check for CAPTCHA challenges
-4. Try logging in manually to verify account status
-5. Use proxies to avoid IP-based blocking
-6. Enable non-headless mode to debug browser issues
-
-#### Issue: AI comment generation failing
-
-**Symptoms:**
-- "API error" messages
-- Empty comments generated
-- High API costs
-
-**Diagnosis:**
-```bash
-# Check API key validity
-curl https://api.anthropic.com/v1/messages \
-  -H "x-api-key: $ANTHROPIC_API_KEY" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "content-type: application/json"
-
-# Check conversation agent logs
-docker-compose logs conversation-agent
-```
-
-**Solutions:**
-1. Verify API key is valid and has credits
-2. Check API rate limits
-3. Switch to fallback provider (OpenAI ↔ Anthropic)
-4. Reduce generation frequency
-5. Check prompt templates for issues
-
-#### Issue: Database connection errors
-
-**Symptoms:**
-- "Connection refused"
-- "Too many connections"
-- "SSL error"
-
-**Diagnosis:**
-```bash
-# Test connection
-psql "postgresql://postgres:[PASSWORD]@db.[PROJECT].supabase.co:5432/postgres"
-
-# Check connection pool
-docker-compose exec linkedin-app python -c "
-from src.database.session import engine
-print(engine.pool.status())
-"
-```
-
-**Solutions:**
-1. Verify SUPABASE_URL and SUPABASE_KEY
-2. Check Supabase project status
-3. Verify connection pooler is enabled
-4. Increase pool size if needed
-5. Check network connectivity
-6. Use transaction mode for pooler (required for asyncpg)
-
-### Debug Mode
-
-Enable debug mode for detailed logging:
+**Kubernetes:**
 
 ```bash
-# Docker
-docker-compose down
-# Edit .env: LOG_LEVEL=DEBUG
-docker-compose up
-
-# Local
-python main.py --log-level DEBUG
-
-# Kubernetes
+# Update the ConfigMap
 kubectl edit configmap linkedin-config -n linkedin-automation
-# Change LOG_LEVEL to DEBUG
+
+# Trigger rolling restart to pick up the change
 kubectl rollout restart deployment --all -n linkedin-automation
+
+# Monitor rollout
+kubectl rollout status deployment/linkedin-orchestrator -n linkedin-automation
 ```
 
-### Health Check Script
-
-Create `scripts/health-check.sh`:
+### 11.2 An Agent Is Crashing / Restarting
 
 ```bash
-#!/bin/bash
+# Identify the problem
+docker-compose logs --tail=100 account-manager
 
-echo "=== LinkedIn Automation Health Check ==="
-echo
+# Common causes and fixes:
+# 1. "Connection refused" on Redis → Redis not started, check REDIS_HOST
+# 2. "Authentication failed" → Wrong OPENAI_API_KEY
+# 3. "No module named X" → pip install -r requirements.txt in container
+# 4. "Rate limited" in LinkedIn → reduce rate limits in config.json
 
-# Check Redis
-echo -n "Redis: "
-if redis-cli ping &> /dev/null; then
-    echo "✅ Healthy"
-else
-    echo "❌ Not responding"
-fi
-
-# Check Database
-echo -n "Database: "
-if python -c "
-import asyncio
-from src.database.session import get_session
-async def test():
-    async with get_session() as session:
-        await session.execute('SELECT 1')
-asyncio.run(test())
-" &> /dev/null; then
-    echo "✅ Healthy"
-else
-    echo "❌ Connection failed"
-fi
-
-# Check Agents
-echo
-echo "Agent Status:"
-redis-cli --raw KEYS 'agent:*:health' | while read key; do
-    agent=$(echo $key | cut -d: -f2)
-    status=$(redis-cli GET $key)
-    echo "  $agent: $status"
-done
-
-echo
-echo "=== End Health Check ==="
+# Isolate the agent for debugging
+docker-compose stop account-manager
+docker-compose run --rm account-manager bash
+# Inside the container:
+python main.py --agents account_manager --log-level DEBUG
 ```
 
-Run it:
+### 11.3 LinkedIn Account Is Flagged / Suspended
+
+1. **Stop interaction agent immediately**
+   ```bash
+   docker-compose stop interaction-agent
+   ```
+
+2. **Check account status in Redis**
+   ```bash
+   docker-compose exec redis redis-cli keys "agents:*"
+   ```
+
+3. **Review safety agent logs**
+   ```bash
+   docker-compose logs --tail=200 safety-agent | grep -i "suspicious\|warning\|flagged"
+   ```
+
+4. **Wait minimum 24–48 hours** before restarting with lower rate limits.
+
+5. **Reduce limits** in `config.json` before restarting:
+   ```json
+   {
+     "linkedin": {
+       "likes_per_hour": 5,
+       "comments_per_hour": 2,
+       "follows_per_hour": 3
+     }
+   }
+   ```
+
+6. Restart with the reduced config and monitor closely for the first hour.
+
+### 11.4 High Memory Usage
+
 ```bash
-chmod +x scripts/health-check.sh
-./scripts/health-check.sh
-```
+# Docker — check per-container usage
+docker stats --no-stream
 
----
-
-## FAQ
-
-### General Questions
-
-**Q: What's the recommended deployment method?**
-A: For production, use Kubernetes. For development or small-scale use, Docker is simpler.
-
-**Q: How many LinkedIn accounts can the system handle?**
-A: With proper scaling, 100+ accounts. Start with 5-10 and scale based on performance.
-
-**Q: What are the ongoing costs?**
-A: Main costs are:
-- Supabase: $0-25/month (free tier available)
-- AI API: $20-200/month depending on usage
-- Infrastructure: Varies by provider (AWS/GKE/etc.)
-
-**Q: Is this against LinkedIn's Terms of Service?**
-A: Automation may violate LinkedIn's ToS. Use at your own risk. This is for educational purposes.
-
-**Q: How much does it cost to run the AI APIs?**
-A: Approximately:
-- Anthropic Claude: ~$0.008 per 1K tokens
-- OpenAI GPT-3.5: ~$0.0015 per 1K tokens
-- Typical comment: 100-200 tokens
-- 1000 comments/day ≈ $1-8/day
-
-### Technical Questions
-
-**Q: Can I use SQLite instead of Supabase?**
-A: Yes for testing, but Supabase/PostgreSQL is required for production (better concurrent access).
-
-**Q: Can I run without Redis?**
-A: No, Redis is required for agent communication and state management.
-
-**Q: What browsers are supported?**
-A: Playwright (Chromium) is primary, Selenium (Chrome/Firefox) as fallback.
-
-**Q: Can I use local AI models instead of API?**
-A: Partially. The code supports local models but requires significant setup and resources.
-
-**Q: How do I add custom agents?**
-A: Inherit from BaseAgent, implement required methods, add to agent registry. See docs/agent-development.md
-
-**Q: Can I run multiple instances for high availability?**
-A: Yes, in Kubernetes with proper state management. Redis handles distributed coordination.
-
-### Troubleshooting Questions
-
-**Q: Why are interactions not executing?**
-A: Check:
-1. Agent health status
-2. Rate limits not exceeded
-3. Accounts not locked
-4. Queue has items
-5. Safety agent not blocking
-
-**Q: Why is memory usage so high?**
-A: Common causes:
-1. Too many browser instances
-2. Large ML models loaded
-3. Memory leaks (restart agents)
-4. Insufficient garbage collection
-
-**Q: How do I reset the system?**
-A:
-```bash
-# Docker
-docker-compose down -v
-docker-compose up -d
+# The content-analyzer and conversation-agent are heaviest
+# (ML models in memory). Reduce instances if OOM kills occur.
+docker-compose up -d --scale content-analyzer=1
 
 # Kubernetes
-kubectl delete namespace linkedin-automation
-# Redeploy
+kubectl top pods -n linkedin-automation
+kubectl edit deployment content-analyzer -n linkedin-automation
+# Reduce 'replicas' and adjust 'resources.limits.memory'
+```
 
-# This will delete all data!
+### 11.5 Redis Queue Backlog
+
+If interactions are queuing faster than agents process them:
+
+```bash
+# Check queue depth
+docker-compose exec redis redis-cli llen "queue:interaction"
+
+# Scale up interaction agents
+docker-compose up -d --scale interaction-agent=4
+
+# Or increase rate limits if within LinkedIn's safe range
+# Or reduce content ingestion rate
+```
+
+### 11.6 Rolling Update (Zero Downtime — Kubernetes Only)
+
+```bash
+# Build and push new image
+docker build -t your-registry.io/linkedin-automation:v1.1.0 .
+docker push your-registry.io/linkedin-automation:v1.1.0
+
+# Update the image tag
+kubectl set image deployment/linkedin-orchestrator \
+  orchestrator=your-registry.io/linkedin-automation:v1.1.0 \
+  -n linkedin-automation
+
+# Monitor the rollout
+kubectl rollout status deployment/linkedin-orchestrator -n linkedin-automation
+
+# Rollback if something goes wrong
+kubectl rollout undo deployment/linkedin-orchestrator -n linkedin-automation
+```
+
+### 11.7 Backup and Restore
+
+**What to back up:**
+
+| Data | Location | Backup Frequency |
+|---|---|---|
+| `.env` file | Local filesystem | After every change |
+| `config/config.json` | Local filesystem | After every change |
+| Supabase database | Managed by Supabase | Daily automatic + manual before migrations |
+| Redis data (if persistence is on) | Docker volume `redis_data` | Daily |
+| LinkedIn session files | Docker volume `linkedin_sessions` | Weekly |
+
+**Back up Redis data:**
+
+```bash
+# Force Redis to write its RDB snapshot
+docker-compose exec redis redis-cli BGSAVE
+
+# Wait for it to complete
+docker-compose exec redis redis-cli LASTSAVE  # note the timestamp
+
+# Copy the dump file from the volume
+docker cp linkedin-redis:/data/dump.rdb ./backups/redis-$(date +%Y%m%d).rdb
+```
+
+**Restore Redis data:**
+
+```bash
+docker-compose stop redis
+docker cp ./backups/redis-20250501.rdb linkedin-redis:/data/dump.rdb
+docker-compose start redis
 ```
 
 ---
 
-## Getting Help
+## 12. Security Hardening
 
-### Documentation
+### 12.1 Before Going to Production
 
-- **Main README**: [README.md](README.md)
-- **API Documentation**: [docs/api.md](docs/api.md) (if available)
-- **Agent Development**: [docs/agents.md](docs/agents.md) (if available)
-- **Configuration Reference**: This guide, Configuration section
+- [ ] **Secrets not in git** — confirm `.env` is in `.gitignore`
+- [ ] **Rotate default credentials** — change all example/default values
+- [ ] **Redis password** — set `REDIS_PASSWORD` in production
+- [ ] **LinkedIn account 2FA** — enable on every managed account
+- [ ] **API key rotation schedule** — plan monthly rotation for OpenAI keys
+- [ ] **Principle of least privilege** — the Supabase DB user should only have access to the `linkedin_automation` schema
+- [ ] **TLS in production** — all traffic behind HTTPS; use a reverse proxy (nginx, Caddy)
+- [ ] **Rate limit Redis port** — Redis (6379) must never be exposed to the internet
 
-### Support Channels
+### 12.2 Docker Security
 
-- **GitHub Issues**: Report bugs and request features
-- **GitHub Discussions**: Ask questions and share ideas
-- **Email Support**: support@example.com (if available)
+The Dockerfile already enforces:
+- Non-root user (`app`, UID 1000)
+- Multi-stage build (build deps not in production image)
+- No `--privileged` flag
 
-### Logs to Provide When Seeking Help
+Additional hardening:
 
-When reporting issues, include:
-
-1. **System Information**
-   ```bash
-   # Docker version
-   docker --version
-   docker-compose --version
-
-   # Kubernetes version
-   kubectl version
-
-   # OS information
-   uname -a
-   ```
-
-2. **Configuration** (sanitized - remove secrets!)
-   ```bash
-   # Environment variables (remove sensitive values)
-   env | grep -E "(REDIS|LOG|LINKEDIN)" | sed 's/=.*/=***/'
-
-   # Config file (remove secrets)
-   cat config/config.json
-   ```
-
-3. **Logs**
-   ```bash
-   # Docker
-   docker-compose logs --tail=100
-
-   # Kubernetes
-   kubectl logs --tail=100 deployment/linkedin-orchestrator -n linkedin-automation
-   ```
-
-4. **Health Status**
-   ```bash
-   ./scripts/health-check.sh
-   ```
-
-### Before Reporting a Bug
-
-- [ ] Check this troubleshooting guide
-- [ ] Search existing GitHub issues
-- [ ] Verify configuration is correct
-- [ ] Check logs for error messages
-- [ ] Try with debug logging enabled
-- [ ] Test with minimal configuration
-- [ ] Verify external services (Supabase, LinkedIn, AI APIs) are working
-
----
-
-## Appendix
-
-### Deployment Decision Matrix
-
-| Factor | Docker | Local | Kubernetes |
-|--------|--------|-------|------------|
-| Setup time | 15-30 min | 20-40 min | 30-60 min |
-| Complexity | Low | Medium | High |
-| Scalability | Medium | Low | High |
-| Resource usage | Medium | Low | High |
-| Best for | Dev/Small prod | Development | Large prod |
-| HA support | No | No | Yes |
-| Auto-scaling | Limited | No | Yes |
-| Monitoring | Built-in | Manual | Built-in |
-| Cost | Low | Lowest | Highest |
-
-### Resource Planning
-
-**For 10 LinkedIn accounts:**
-- CPU: 4 cores
-- RAM: 8 GB
-- Storage: 50 GB
-- Estimated monthly cost: $50-100 (cloud) + API costs
-
-**For 50 LinkedIn accounts:**
-- CPU: 8-16 cores
-- RAM: 16-32 GB
-- Storage: 100 GB
-- Estimated monthly cost: $200-400 (cloud) + API costs
-
-**For 100+ LinkedIn accounts:**
-- CPU: 16+ cores (distributed)
-- RAM: 32+ GB (distributed)
-- Storage: 200+ GB
-- Estimated monthly cost: $500+ (cloud) + API costs
-
-### Port Reference
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| Web Dashboard | 8080 | Main application UI |
-| API Server | 8000 | REST API |
-| Redis | 6379 | Message queue & cache |
-| Prometheus | 9090 | Metrics collection |
-| Grafana | 3000 | Monitoring dashboards |
-| Database | 5432 | PostgreSQL (Supabase) |
-
-### Glossary
-
-- **Agent**: Autonomous component responsible for specific tasks
-- **Orchestrator**: Coordinates agent lifecycle and communication
-- **Message Queue**: Redis-backed queue for inter-agent communication
-- **State Manager**: Distributed state storage with versioning
-- **Rate Limiting**: Restricting action frequency to avoid detection
-- **Headless Browser**: Browser automation without GUI
-- **Embeddings**: Vector representations of text for similarity matching
-- **NLP**: Natural Language Processing
-- **HPA**: Horizontal Pod Autoscaler (Kubernetes)
-- **PVC**: Persistent Volume Claim (Kubernetes)
-
----
-
-## Conclusion
-
-You should now have a comprehensive understanding of how to deploy the LinkedIn Multi-Agent Automation System in various environments. Remember:
-
-1. **Start small**: Deploy locally or with Docker first
-2. **Test thoroughly**: Verify each component before production
-3. **Monitor actively**: Watch metrics and logs closely
-4. **Scale gradually**: Increase load incrementally
-5. **Stay compliant**: Respect LinkedIn's ToS and rate limits
-
-For additional help, consult the troubleshooting section or reach out via GitHub issues.
-
-**Happy Automating!** 🚀
-
----
-
-*Last updated: December 26, 2025*
-*Version: 1.0*
-*Maintained by: Development Team*
-## System Requirements
-
-### Minimum Requirements:
-- **CPU:** 2 cores
-- **RAM:** 4GB
-- **Storage:** 10GB free space
-- **OS:** Linux/macOS/Windows
-- **Python:** 3.9+
-- **Node.js:** 16+
-
-### Recommended for Production:
-- **CPU:** 4+ cores
-- **RAM:** 8GB+
-- **Storage:** 50GB+ SSD
-- **OS:** Ubuntu 20.04 LTS or CentOS 8
-- **Network:** Stable internet connection
-
-## Initial Setup Steps
-
-### 1. Add LinkedIn Accounts
-```bash
-curl -X POST "http://localhost:8000/api/accounts" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "your-linkedin-email@example.com",
-    "password": "your-password",
-    "display_name": "Account 1",
-    "max_daily_interactions": 50
-  }'
-```
-
-### 2. Add WhatsApp Groups
-```bash
-curl -X POST "http://localhost:8000/api/whatsapp/groups" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "group_name": "Tech Professionals",
-    "keywords": ["technology", "startup", "AI"]
-  }'
-```
-
-### 3. Configure Automation
-```bash
-curl -X PUT "http://localhost:8000/api/automation/config" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "enabled": true,
-    "ai_enabled": true,
-    "openai_api_key": "your-api-key",
-    "max_posts_per_day": 30,
-    "comment_probability": 0.4
-  }'
-```
-
-### 4. Start Automation
-```bash
-curl -X POST "http://localhost:8000/api/automation/start"
-```
-
-## Campaign API Deployment
-
-The Campaign API provides endpoints for managing LinkedIn engagement campaigns with idempotency support.
-
-### 1. Run Database Schema in Supabase
-
-Execute the following SQL in Supabase SQL Editor:
-
-```sql
--- Campaign Status Enum
-CREATE TYPE campaign_status AS ENUM (
-    'draft', 'scheduled', 'running', 'paused', 'completed', 'failed', 'cancelled'
-);
-
--- Campaigns Table
-CREATE TABLE campaigns (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    status campaign_status NOT NULL DEFAULT 'draft',
-    target_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
-    account_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-    actions JSONB NOT NULL DEFAULT '{"like": true, "comment": false}'::jsonb,
-    priority INTEGER NOT NULL DEFAULT 1 CHECK (priority BETWEEN 1 AND 3),
-    scheduled_start_at TIMESTAMPTZ,
-    scheduled_end_at TIMESTAMPTZ,
-    started_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ,
-    total_tasks INTEGER NOT NULL DEFAULT 0,
-    completed_tasks INTEGER NOT NULL DEFAULT 0,
-    failed_tasks INTEGER NOT NULL DEFAULT 0,
-    deleted_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Campaign Tasks Table
-CREATE TABLE campaign_tasks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    campaign_id UUID NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
-    orchestrator_task_id VARCHAR(255) NOT NULL,
-    target_url TEXT NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'pending',
-    result JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at TIMESTAMPTZ,
-    UNIQUE(campaign_id, orchestrator_task_id)
-);
-
--- Idempotency Keys Table
-CREATE TABLE idempotency_keys (
-    key VARCHAR(255) PRIMARY KEY,
-    resource_type VARCHAR(50) NOT NULL,
-    resource_id UUID,
-    response_code INTEGER,
-    response_body JSONB,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours')
-);
-
--- Indexes
-CREATE INDEX idx_campaigns_status ON campaigns(status) WHERE deleted_at IS NULL;
-CREATE INDEX idx_campaigns_created ON campaigns(created_at DESC) WHERE deleted_at IS NULL;
-CREATE INDEX idx_campaign_tasks_campaign ON campaign_tasks(campaign_id);
-CREATE INDEX idx_campaign_tasks_status ON campaign_tasks(status);
-CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
-```
-
-### 2. Start API Server
-```bash
-python -m uvicorn src.api.main:app --reload --port 8000
-```
-
-### 3. Campaign API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/campaigns` | Create campaign |
-| GET | `/api/v1/campaigns` | List campaigns |
-| GET | `/api/v1/campaigns/{id}` | Get campaign |
-| POST | `/api/v1/campaigns/{id}/start` | Start campaign |
-| POST | `/api/v1/campaigns/{id}/pause` | Pause campaign |
-| GET | `/api/v1/campaigns/{id}/status` | Get progress |
-
-### 4. Test Campaign Endpoints
-
-```bash
-# Create a campaign (requires X-Idempotency-Key header)
-curl -X POST http://localhost:8000/api/v1/campaigns \
-  -H "Content-Type: application/json" \
-  -H "X-Idempotency-Key: $(uuidgen)" \
-  -d '{
-    "name": "Test Campaign",
-    "target_urls": ["https://linkedin.com/posts/example-123"],
-    "account_ids": ["your-account-uuid"],
-    "actions": {"like": true, "comment": false}
-  }'
-
-# List all campaigns
-curl http://localhost:8000/api/v1/campaigns
-
-# Start a campaign
-curl -X POST "http://localhost:8000/api/v1/campaigns/<campaign-id>/start" \
-  -H "X-Idempotency-Key: $(uuidgen)"
-
-# Get campaign status
-curl http://localhost:8000/api/v1/campaigns/<campaign-id>/status
-```
-
-## Monitoring & Maintenance
-
-### Health Checks:
-```bash
-# System health
-curl http://localhost:8000/api/health
-
-# Detailed status
-curl http://localhost:8000/api/status
-
-# Account metrics
-curl http://localhost:8000/api/metrics/accounts
-```
-
-### Log Monitoring:
-```bash
-# View backend logs
-tail -f /var/log/linkedin-automation/backend.log
-
-# View access logs  
-tail -f /var/log/linkedin-automation/access.log
-```
-
-### Backup Procedures:
-```bash
-# Backup account data
-cp -r data/ backup/data-$(date +%Y%m%d)/
-
-# Backup configuration
-cp src/api/main_simple_integrated.py backup/config-$(date +%Y%m%d).py
-```
-
-## Troubleshooting
-
-### Common Issues:
-
-#### 1. Browser Not Found
-```bash
-# Solution: Install Playwright browsers
-playwright install
-```
-
-#### 2. LinkedIn Login Fails
-- Check account credentials
-- Verify LinkedIn account is not locked
-- Check for 2FA requirements
-- Review LinkedIn rate limits
-
-#### 3. WhatsApp Web Connection Issues
-- Ensure WhatsApp Web is accessible
-- Check browser permissions
-- Verify QR code scanning
-
-#### 4. API Errors
-```bash
-# Check service status
-curl http://localhost:8000/api/health
-
-# View logs for errors
-tail -f logs/app.log
-```
-
-#### 5. Supabase Connection Issues
-
-**Error: "Tenant or user not found"**
-- **Cause:** Wrong region in connection string
-- **Solution:** Check your Supabase project region in Dashboard → Settings → Database
-- Use the correct region format: `aws-1-[REGION].pooler.supabase.com`
-
-**Error: "prepared statement already exists"**
-- **Cause:** Missing statement cache configuration for asyncpg
-- **Solution:** Ensure `src/database/session.py` has:
-```python
-connect_args = {
-    "statement_cache_size": 0,
-    "prepared_statement_cache_size": 0,
-}
-```
-
-**Error: "connection refused" on port 5432**
-- **Cause:** Using direct connection instead of pooler
-- **Solution:** Use port `6543` (transaction mode pooler), not `5432`
-
-**Test your connection:**
-```bash
-python -c "
-import asyncio
-import asyncpg
-async def test():
-    conn = await asyncpg.connect('YOUR_SUPABASE_DB_URL', statement_cache_size=0)
-    print(await conn.fetchval('SELECT NOW()'))
-    await conn.close()
-asyncio.run(test())
-"
-```
-
-### Performance Optimization:
-
-#### 1. Database Optimization:
-- Use Redis for caching
-- Index frequently queried fields
-- Implement connection pooling
-
-#### 2. Memory Management:
-- Monitor browser memory usage
-- Implement browser recycling
-- Use headless mode in production
-
-#### 3. Network Optimization:
-- Use CDN for static assets
-- Enable gzip compression
-- Implement request caching
-
-## Security Best Practices
-
-### 1. Account Security:
-- Use strong, unique passwords
-- Enable 2FA where possible
-- Rotate credentials regularly
-- Monitor for suspicious activity
-
-### 2. API Security:
-- Implement rate limiting
-- Use HTTPS in production
-- Validate all input data
-- Log security events
-
-### 3. Browser Security:
-- Run browsers in sandboxed mode
-- Use clean browser profiles
-- Monitor for detection
-
-## Scaling Considerations
-
-### Horizontal Scaling:
 ```yaml
-# Load balancer configuration
-version: '3.8'
+# docker-compose.yml additions
 services:
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-
-  backend1:
-    build: .
-    environment:
-      - INSTANCE_ID=backend1
-
-  backend2: 
-    build: .
-    environment:
-      - INSTANCE_ID=backend2
+  linkedin-app:
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Drop all capabilities
+    cap_drop:
+      - ALL
 ```
 
-### Database Scaling:
-- Redis clustering for high availability
-- Database read replicas for queries
-- Separate analytics database
+### 12.3 Redis Hardening
 
-## Support & Maintenance
+For production Redis, always set a password and disable dangerous commands:
 
-### Regular Maintenance Tasks:
-- Weekly: Review account health scores
-- Monthly: Update browser versions
-- Quarterly: Security audit and password rotation
-- As needed: LinkedIn selector updates
+```bash
+# redis.conf additions
+requirepass your-strong-redis-password
+rename-command FLUSHALL ""
+rename-command FLUSHDB ""
+rename-command CONFIG ""
+rename-command KEYS ""
+bind 127.0.0.1  # or the Docker network IP only
+```
 
-### Monitoring Alerts:
-- Account suspension warnings
-- High error rates
-- Memory/CPU usage alerts
-- Queue size monitoring
+Pass this to Docker:
 
-For additional support or questions, refer to the system documentation or contact the development team.
+```yaml
+services:
+  redis:
+    command: redis-server /usr/local/etc/redis/redis.conf
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+```
+
+### 12.4 Secret Rotation Procedure
+
+1. Generate new key/credential
+2. Update the secret in your secret manager (Kubernetes secret, environment)
+3. Rolling restart agents: `kubectl rollout restart deployment --all -n linkedin-automation`
+4. Verify agents reconnect successfully
+5. Revoke the old credential
+
+### 12.5 `.gitignore` Essentials
+
+Confirm these are in `.gitignore`:
+
+```
+.env
+.env.*
+config/config.json
+config/sample_config.json
+*.encryption_key
+logs/
+data/
+sessions/
+*.db
+```
+
+---
+
+## 13. Troubleshooting
+
+### Import / Module Errors
+
+**Symptom:** `ModuleNotFoundError: No module named 'src'`
+
+This happens when running Python commands from a directory other than the repo root,
+or when `src` is not on the path.
+
+```bash
+# Always run from the repo root
+cd /path/to/Social-Bot-LinkedIn-
+
+# Confirm Python sees the correct working directory
+python3 -c "import os; print(os.getcwd())"
+# Should print the repo root
+
+# Then run
+python main.py --dry-run
+```
+
+---
+
+**Symptom:** `ModuleNotFoundError: No module named 'playwright'`
+
+```bash
+# Ensure virtualenv is activated
+which python  # should point to venv/bin/python
+
+# Re-install
+pip install -r requirements.txt
+playwright install chromium
+```
+
+---
+
+### Redis Connection Errors
+
+**Symptom:** `Connection refused` or `ConnectionError`
+
+```bash
+# Is Redis actually running?
+redis-cli ping               # local
+docker-compose ps redis      # Docker
+
+# Is REDIS_HOST set correctly?
+# Local development → REDIS_HOST=localhost
+# Docker → REDIS_HOST=redis (the service name in docker-compose.yml)
+echo $REDIS_HOST
+
+# Test connection directly
+redis-cli -h $REDIS_HOST -p $REDIS_PORT ping
+```
+
+---
+
+### Database Connection Errors
+
+**Symptom:** `asyncpg.exceptions.TooManyConnectionsError`
+
+```bash
+# The Supabase pooler must be in Transaction mode for asyncpg
+# Check your SUPABASE_DB_URL — the port for Transaction mode is 6543
+# Session mode port is 5432
+
+# If using direct connection (port 5432), switch to pooler (6543)
+```
+
+**Symptom:** `prepared statement "..." already exists`
+
+```bash
+# This happens when NOT using the Supabase pooler's Transaction mode
+# The code already disables prepared statement caching for Supabase pooler URLs
+# Ensure your SUPABASE_DB_URL contains "pooler.supabase.com" so the code
+# applies the correct connection args
+```
+
+---
+
+### Agents Not Appearing in Heartbeats
+
+**Symptom:** `redis-cli keys "heartbeat:*"` returns empty
+
+1. Check the orchestrator logs — did agent initialization fail?
+   ```bash
+   docker-compose logs linkedin-app | grep -i "error\|failed\|exception"
+   ```
+
+2. Confirm `OPENAI_API_KEY` is set (required for `content_analysis` and `conversation`)
+   ```bash
+   docker-compose exec linkedin-app env | grep OPENAI
+   ```
+
+3. Check agent dependency order — `interaction` requires `account_manager` to be registered first:
+   ```bash
+   docker-compose logs | grep "Agent started"
+   ```
+
+---
+
+### Configuration Validation Fails
+
+**Symptom:** `python main.py --dry-run` prints `Configuration errors:`
+
+```
+- "OpenAI API key required for content analysis and conversation agents"
+```
+
+Fix: Set `OPENAI_API_KEY` in your environment or in `config/config.json` under
+`content_analysis.openai_api_key` and `conversation.openai_api_key`.
+
+```
+- "Daily like limit must be greater than hourly limit"
+```
+
+Fix: Ensure `likes_per_day > likes_per_hour` in your config.
+
+---
+
+### Docker Image Build Failures
+
+**Symptom:** Build fails on `pip install torch` with OOM error
+
+```bash
+# Increase Docker memory limit to at least 4GB
+# Docker Desktop: Settings → Resources → Memory
+
+# Or build on a machine/VM with more RAM
+```
+
+**Symptom:** Playwright install fails in Docker
+
+```bash
+# Rebuild with no cache to get fresh apt packages
+docker-compose build --no-cache
+
+# If behind a corporate proxy, pass proxy args:
+docker-compose build \
+  --build-arg HTTP_PROXY=$HTTP_PROXY \
+  --build-arg HTTPS_PROXY=$HTTPS_PROXY
+```
+
+---
+
+### Kubernetes — Pods Stuck in `Pending`
+
+```bash
+kubectl describe pod <pod-name> -n linkedin-automation | grep -A 10 Events
+
+# Common causes:
+# "Insufficient memory" → node doesn't have enough RAM, scale cluster or reduce requests
+# "no persistent volumes available" → StorageClass not configured
+# "ImagePullBackOff" → wrong image name or registry not authenticated
+```
+
+**Fix ImagePullBackOff (private registry):**
+
+```bash
+kubectl create secret docker-registry regcred \
+  --docker-server=your-registry.io \
+  --docker-username=your-user \
+  --docker-password=your-password \
+  -n linkedin-automation
+
+# Add to deployment spec:
+# spec:
+#   imagePullSecrets:
+#   - name: regcred
+```
+
+---
+
+## 14. Appendix
+
+### 14.1 Deployment Decision Matrix
+
+| Factor | Docker Compose | Local Dev | Kubernetes |
+|---|---|---|---|
+| Setup time | 20–30 min | 25–40 min | 45–60 min |
+| Complexity | Low | Medium | High |
+| Scalability | Medium (manual) | Low | High (HPA) |
+| Debugging | Medium | Best | Hard |
+| Production-ready | Yes (single server) | No | Yes (multi-server) |
+| Auto-healing | Partial (`restart: unless-stopped`) | No | Yes |
+| Recommended for | First deployment | Development | Scale production |
+
+### 14.2 Resource Sizing Guide
+
+| Account Count | CPU | RAM | Agent Config |
+|---|---|---|---|
+| 1–5 | 2 cores | 4 GB | 1 instance each |
+| 6–20 | 4 cores | 8 GB | 1–2 instances each |
+| 21–50 | 8 cores | 16 GB | 2–3 content-analyzer, 3–5 interaction |
+| 50+ | 16+ cores | 32+ GB | K8s with HPA recommended |
+
+### 14.3 Port Reference
+
+| Port | Service | Exposed? |
+|---|---|---|
+| `8080` | Web dashboard / app | Yes (localhost in dev) |
+| `8000` | FastAPI / REST API | Yes (localhost in dev) |
+| `6379` | Redis | No (internal only in prod) |
+| `9090` | Prometheus | Optional (monitoring profile) |
+| `3000` | Grafana | Optional (monitoring profile) |
+| `5432` | PostgreSQL | No (managed by Supabase) |
+
+### 14.4 Valid Agent Names (CLI Reference)
+
+These are the exact strings accepted by `--agents` and present in `config.agents`:
+
+```
+account_manager
+content_analysis
+interaction
+conversation
+safety
+scheduler
+analytics
+whatsapp_monitor
+```
+
+### 14.5 Tested Dependency Versions
+
+| Component | Version in `requirements.txt` |
+|---|---|
+| Python | 3.11 (Dockerfile), 3.8+ (local) |
+| redis-py | 4.5.4 |
+| playwright | 1.32.1 |
+| openai | 0.27.4 |
+| sqlalchemy | 2.0.10 |
+| asyncpg | 0.27.0 |
+| spacy | 3.5.2 |
+| structlog | 23.1.0 |
+| torch | 2.0.0 |
+| pydantic | 1.10.7 |
+
+Upgrading major versions (especially `openai`, `pydantic`, `torch`) without testing
+is likely to break things. The `openai` 0.27.x SDK has a different API surface than
+1.x and 2.x.
+
+### 14.6 Health Check Script
+
+Save this as `scripts/verify-deployment.sh` and run it after any deployment:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+REDIS_HOST="${REDIS_HOST:-localhost}"
+REDIS_PORT="${REDIS_PORT:-6379}"
+
+echo "=== LinkedIn Automation Deployment Verification ==="
+echo
+
+# Redis
+printf "Redis connectivity... "
+if redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" ping &>/dev/null; then
+    echo "OK"
+else
+    echo "FAIL — is Redis running? Is REDIS_HOST=$REDIS_HOST correct?"
+    exit 1
+fi
+
+# Agent heartbeats
+printf "Agent heartbeats...   "
+HEARTBEATS=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" keys "heartbeat:*" 2>/dev/null | wc -l)
+if [ "$HEARTBEATS" -gt 0 ]; then
+    echo "OK ($HEARTBEATS agents registered)"
+else
+    echo "WARN — no heartbeats found. Agents may still be starting up."
+fi
+
+# Orchestrator metrics
+printf "Orchestrator state... "
+STATE=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" hget orchestrator:info state 2>/dev/null)
+if [ "$STATE" = "running" ]; then
+    echo "OK (state=running)"
+else
+    echo "WARN — state='$STATE' (expected 'running')"
+fi
+
+# Config validation
+printf "Configuration...      "
+if python main.py --dry-run &>/dev/null; then
+    echo "OK"
+else
+    echo "FAIL — run 'python main.py --dry-run' to see errors"
+    exit 1
+fi
+
+echo
+echo "=== Verification complete ==="
+```
+
+```bash
+chmod +x scripts/verify-deployment.sh
+./scripts/verify-deployment.sh
+```
+
+---
+
+*Verified against source code — May 2025*
+*Report inaccuracies via GitHub issues*

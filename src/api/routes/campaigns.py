@@ -4,7 +4,7 @@ Campaign API Routes
 Provides CRUD and execution endpoints for LinkedIn campaigns.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 import uuid
@@ -33,11 +33,21 @@ from src.api.middleware.idempotency import (
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
 
-def get_campaign_service(db: AsyncSession = Depends(get_db)) -> CampaignService:
-    """Dependency to get CampaignService instance."""
-    # Note: orchestrator and redis_client can be injected here when available
-    # For now, we create service without them for testing
-    return CampaignService(session=db)
+def get_campaign_service(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> CampaignService:
+    """
+    Dependency to get a CampaignService instance.
+
+    The campaign<->agent task bridge and Redis client are attached to
+    ``app.state`` by the lifespan when Redis is reachable; when they are absent
+    (e.g. under the test transport, which does not run lifespan) the service
+    degrades gracefully to the "orchestrator not configured" path.
+    """
+    orchestrator = getattr(request.app.state, "task_orchestrator", None)
+    redis_client = getattr(request.app.state, "redis", None)
+    return CampaignService(session=db, orchestrator=orchestrator, redis_client=redis_client)
 
 
 @router.post(
