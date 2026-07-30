@@ -8,7 +8,9 @@ being able to show someone the ramp before they connect an account is the point.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,6 +89,47 @@ async def account_today(
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     return await warmup_service.today(db, account)
+
+
+@router.post("/accounts/{account_id}/run")
+async def run_warmup(
+    account_id: str,
+    request: Request,
+    ctx: RequestContext = Depends(get_request_context),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """
+    Perform whatever this account is due to do right now.
+
+    Safe to call on a short interval — only actions whose planned time has
+    passed are performed, and work already done today is subtracted, so calling
+    it more often does not make the account act faster.
+
+    Likes and follows happen directly. Comments are drafted and placed in the
+    approval queue, because they are published under the user's name.
+    """
+    from src.warmup import runner
+
+    account = await accounts_service.get_account_record(db, account_id, ctx.org_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    redis = getattr(request.app.state, "redis", None)
+    limiter = None
+    if redis is not None:
+        from src.infrastructure.rate_policy import AccountRateLimiter
+
+        limiter = AccountRateLimiter(redis)
+    elif os.getenv("ALLOW_UNCAPPED_SENDING", "").lower() != "true":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Rate limiting is unavailable (no Redis), so warm-up activity is "
+                "disabled. Connect Redis, or set ALLOW_UNCAPPED_SENDING=true."
+            ),
+        )
+
+    return await runner.run_today(db, account, rate_limiter=limiter)
 
 
 @router.post("/accounts/{account_id}/pause")
