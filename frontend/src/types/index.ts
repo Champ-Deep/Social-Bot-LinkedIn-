@@ -145,3 +145,220 @@ export interface AuthToken {
   access_token: string;
   token_type: string;
 }
+
+// ---------------------------------------------------------------------------
+// Outreach: connected accounts, ICP targeting, and the approval queue
+// ---------------------------------------------------------------------------
+
+export type AccountStatus =
+  | 'active'
+  | 'inactive'
+  | 'suspended'
+  | 'rate_limited'
+  | 'auth_required'
+  | 'error';
+
+export type EngagementMode = 'outreach' | 'account_based_engagement';
+
+export interface ActionCaps {
+  per_hour: number;
+  per_day: number;
+  cooldown_seconds: number;
+}
+
+export interface AccountPolicy {
+  actions: Record<string, ActionCaps>;
+  suggestion_budget: number;
+  active_hours: [number, number];
+  warmup: boolean;
+}
+
+export interface ConnectedAccount {
+  id: string;
+  org_id: string;
+  user_id: string;
+  status: AccountStatus;
+  mode?: EngagementMode;
+  display_name?: string;
+  headline?: string;
+  profile_url?: string;
+  linkedin_member_urn?: string;
+  active_icp_id?: string;
+  policy: AccountPolicy;
+  has_credentials: boolean;
+  transport?: string;
+  last_post_at?: string;
+  last_active_at?: string;
+  created_at?: string;
+}
+
+export interface AccountConnectPayload {
+  li_at: string;
+  jsessionid?: string;
+  label?: string;
+  mode?: EngagementMode;
+  proxy_url?: string;
+  timezone?: string;
+}
+
+export interface ICP {
+  id: string;
+  org_id: string;
+  account_id?: string;
+  name: string;
+  titles: string[];
+  seniorities: string[];
+  industries: string[];
+  keywords: string[];
+  excluded_keywords: string[];
+  excluded_titles: string[];
+  locations: string[];
+  company_sizes: string[];
+  value_proposition?: string;
+  instructions?: string;
+  relevance_floor: number;
+  is_active: boolean;
+  created_at?: string;
+}
+
+export type ICPPayload = Omit<ICP, 'id' | 'org_id' | 'is_active' | 'created_at'>;
+
+export type TargetStatus =
+  | 'new'
+  | 'scored'
+  | 'suggested'
+  | 'approved'
+  | 'contacted'
+  | 'connected'
+  | 'replied'
+  | 'skipped'
+  | 'suppressed';
+
+export interface Target {
+  id: string;
+  account_id: string;
+  member_urn: string;
+  public_id?: string;
+  profile_url?: string;
+  full_name?: string;
+  first_name?: string;
+  headline?: string;
+  title?: string;
+  company?: string;
+  industry?: string;
+  location?: string;
+  source?: string;
+  relevance_score: number;
+  relevance_reasons: string[];
+  status: TargetStatus;
+  last_touched_at?: string;
+  created_at?: string;
+}
+
+export interface TargetImportItem {
+  profile_url?: string;
+  member_urn?: string;
+  full_name?: string;
+  first_name?: string;
+  headline?: string;
+  title?: string;
+  company?: string;
+  industry?: string;
+  location?: string;
+  source?: string;
+  context?: Record<string, unknown>;
+}
+
+export type SuggestionAction = 'connect' | 'message' | 'comment' | 'like' | 'follow';
+
+export type SuggestionStatus =
+  | 'pending'
+  | 'approved'
+  | 'scheduled'
+  | 'sent'
+  | 'failed'
+  | 'rejected'
+  | 'expired'
+  | 'blocked';
+
+export interface TargetSummary {
+  id: string;
+  full_name?: string;
+  first_name?: string;
+  headline?: string;
+  title?: string;
+  company?: string;
+  location?: string;
+  profile_url?: string;
+  status?: string;
+}
+
+export interface Suggestion {
+  id: string;
+  account_id: string;
+  target_id: string;
+  action: SuggestionAction;
+  status: SuggestionStatus;
+  draft_text?: string;
+  final_text?: string;
+  rationale?: string;
+  relevance_score: number;
+  relevance_reasons: string[];
+  quality_score?: number;
+  quality_warnings: string[];
+  generated_by?: string;
+  subject_urn?: string;
+  scheduled_for?: string;
+  sent_at?: string;
+  error?: string;
+  created_at?: string;
+  target?: TargetSummary;
+}
+
+export interface GenerateResult {
+  created: Suggestion[];
+  considered: number;
+  skipped: Record<string, number>;
+  message: string;
+}
+
+export interface ActivityItem {
+  id: string;
+  account_id: string;
+  action: string;
+  status: string;
+  target_name?: string;
+  target_headline?: string;
+  text?: string;
+  relevance_score: number;
+  occurred_at?: string;
+  error?: string;
+}
+
+export interface AccountStats {
+  account_id: string;
+  display_name?: string;
+  status: AccountStatus;
+  mode?: EngagementMode;
+  pending_review: number;
+  scheduled: number;
+  sent_today: number;
+  sent_total: number;
+  failed: number;
+  connects_sent: number;
+  messages_sent: number;
+  remaining_today: Record<string, number>;
+}
+
+export interface Dashboard {
+  accounts: AccountStats[];
+  totals: Record<string, number>;
+}
+
+export interface ScorePreview {
+  score: number;
+  reasons: string[];
+  excluded: boolean;
+  exclusion_reason?: string;
+  passes_floor: boolean;
+}

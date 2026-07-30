@@ -1,9 +1,13 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'framer-motion';
+import { Accounts } from './pages/Accounts';
+import { AgentMonitor } from './pages/AgentMonitor';
+import { Approvals } from './pages/Approvals';
 import { CampaignList } from './pages/CampaignList';
 import { CreateCampaign } from './pages/CreateCampaign';
-import { AgentMonitor } from './pages/AgentMonitor';
+import { Dashboard } from './pages/Dashboard';
+import { Targeting } from './pages/Targeting';
 import { Navigation } from './components/Navigation';
 
 // Create React Query client
@@ -21,7 +25,7 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <div className="min-h-screen bg-gray-50">
+        <div className="min-h-screen bg-background">
           <Navigation />
           <AnimatedRoutes />
         </div>
@@ -36,39 +40,22 @@ function AnimatedRoutes() {
   return (
     <AnimatePresence mode="wait">
       <Routes location={location} key={location.pathname}>
-        <Route path="/" element={<Navigate to="/campaigns" replace />} />
-        <Route
-          path="/campaigns"
-          element={
-            <PageWrapper>
-              <CampaignList />
-            </PageWrapper>
-          }
-        />
-        <Route
-          path="/campaigns/new"
-          element={
-            <PageWrapper>
-              <CreateCampaign />
-            </PageWrapper>
-          }
-        />
-        <Route
-          path="/agents"
-          element={
-            <PageWrapper>
-              <AgentMonitor />
-            </PageWrapper>
-          }
-        />
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route path="/dashboard" element={<Page><Dashboard /></Page>} />
+        <Route path="/approvals" element={<Page><Approvals /></Page>} />
+        <Route path="/accounts" element={<Page><Accounts /></Page>} />
+        <Route path="/targeting" element={<Page><Targeting /></Page>} />
+        <Route path="/campaigns" element={<Page><CampaignList /></Page>} />
+        <Route path="/campaigns/new" element={<Page><CreateCampaign /></Page>} />
+        <Route path="/agents" element={<Page><AgentMonitor /></Page>} />
         {/* Catch-all redirect */}
-        <Route path="*" element={<Navigate to="/campaigns" replace />} />
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
     </AnimatePresence>
   );
 }
 
-function PageWrapper({ children }: { children: React.ReactNode }) {
+function Page({ children }: { children: React.ReactNode }) {
   return (
     <motion.div
       initial={{ opacity: 0 }}

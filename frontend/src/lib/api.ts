@@ -6,10 +6,21 @@
 
 import axios from 'axios';
 import type {
+  AccountConnectPayload,
+  ActivityItem,
   Agent,
   Campaign,
   CampaignCreate,
+  ConnectedAccount,
+  Dashboard,
+  GenerateResult,
+  ICP,
+  ICPPayload,
   PaginatedResponse,
+  ScorePreview,
+  Suggestion,
+  Target,
+  TargetImportItem,
 } from '@/types';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '/api/v1';
@@ -124,5 +135,170 @@ export const agentApi = {
   async list(): Promise<Agent[]> {
     const { data } = await http.get('/agents');
     return data as Agent[];
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Outreach API: accounts, targeting, and the approval queue
+// ---------------------------------------------------------------------------
+
+export const accountApi = {
+  async list(): Promise<ConnectedAccount[]> {
+    const { data } = await http.get('/accounts');
+    return data.accounts ?? [];
+  },
+
+  async connect(payload: AccountConnectPayload): Promise<ConnectedAccount> {
+    const { data } = await http.post('/accounts', payload, {
+      headers: idempotencyKey(),
+    });
+    return data as ConnectedAccount;
+  },
+
+  async update(
+    id: string,
+    payload: Partial<{
+      mode: string;
+      status: string;
+      active_icp_id: string;
+      daily_caps: Record<string, unknown>;
+      display_name: string;
+    }>,
+  ): Promise<ConnectedAccount> {
+    const { data } = await http.patch(`/accounts/${id}`, payload);
+    return data as ConnectedAccount;
+  },
+
+  async rotateCredentials(
+    id: string,
+    payload: { li_at: string; jsessionid?: string },
+  ): Promise<ConnectedAccount> {
+    const { data } = await http.post(`/accounts/${id}/credentials`, payload);
+    return data as ConnectedAccount;
+  },
+
+  async verify(id: string): Promise<{ ok: boolean; status: string; error?: string }> {
+    const { data } = await http.post(`/accounts/${id}/verify`);
+    return data;
+  },
+
+  async disconnect(id: string): Promise<void> {
+    await http.delete(`/accounts/${id}`);
+  },
+};
+
+export const targetingApi = {
+  async listIcps(): Promise<ICP[]> {
+    const { data } = await http.get('/targeting/icps');
+    return data as ICP[];
+  },
+
+  async createIcp(payload: Partial<ICPPayload> & { name: string }): Promise<ICP> {
+    const { data } = await http.post('/targeting/icps', payload, {
+      headers: idempotencyKey(),
+    });
+    return data as ICP;
+  },
+
+  async updateIcp(id: string, payload: Partial<ICPPayload>): Promise<ICP> {
+    const { data } = await http.patch(`/targeting/icps/${id}`, payload);
+    return data as ICP;
+  },
+
+  async deleteIcp(id: string): Promise<void> {
+    await http.delete(`/targeting/icps/${id}`);
+  },
+
+  // Score a hypothetical person against a draft ICP without saving anything.
+  async preview(
+    icp: Partial<ICPPayload>,
+    target: TargetImportItem,
+  ): Promise<ScorePreview> {
+    const { data } = await http.post('/targeting/preview', { icp, target });
+    return data as ScorePreview;
+  },
+
+  async listTargets(accountId?: string, status?: string): Promise<Target[]> {
+    const { data } = await http.get('/targeting/targets', {
+      params: { account_id: accountId, status },
+    });
+    return data.targets ?? [];
+  },
+
+  async importTargets(payload: {
+    account_id: string;
+    icp_id?: string;
+    targets: TargetImportItem[];
+  }): Promise<{ imported: number; duplicates: number; targets: Target[] }> {
+    const { data } = await http.post('/targeting/targets', payload, {
+      headers: idempotencyKey(),
+    });
+    return data;
+  },
+
+  async suppress(targetId: string): Promise<Target> {
+    const { data } = await http.post(`/targeting/targets/${targetId}/suppress`);
+    return data as Target;
+  },
+};
+
+export const outreachApi = {
+  async generate(
+    accountId: string,
+    icpId?: string,
+    limit?: number,
+  ): Promise<GenerateResult> {
+    const { data } = await http.post(
+      '/outreach/suggestions',
+      { account_id: accountId, icp_id: icpId, limit },
+      { headers: idempotencyKey() },
+    );
+    return data as GenerateResult;
+  },
+
+  async list(accountId?: string, status = 'pending'): Promise<Suggestion[]> {
+    const { data } = await http.get('/outreach/suggestions', {
+      params: { account_id: accountId, status },
+    });
+    return data.suggestions ?? [];
+  },
+
+  async approve(id: string, editedText?: string, sendAt?: string): Promise<Suggestion> {
+    const { data } = await http.post(`/outreach/suggestions/${id}/approve`, {
+      edited_text: editedText,
+      send_at: sendAt,
+    });
+    return data as Suggestion;
+  },
+
+  async reject(id: string, suppressTarget = false): Promise<Suggestion> {
+    const { data } = await http.post(`/outreach/suggestions/${id}/reject`, {
+      suppress_target: suppressTarget,
+    });
+    return data as Suggestion;
+  },
+
+  async send(id: string): Promise<Suggestion> {
+    const { data } = await http.post(`/outreach/suggestions/${id}/send`);
+    return data as Suggestion;
+  },
+
+  async runDue(
+    accountId: string,
+  ): Promise<{ sent: string[]; blocked: Record<string, string> }> {
+    const { data } = await http.post(`/outreach/accounts/${accountId}/run`);
+    return data;
+  },
+
+  async activity(accountId?: string): Promise<ActivityItem[]> {
+    const { data } = await http.get('/outreach/activity', {
+      params: { account_id: accountId },
+    });
+    return data.items ?? [];
+  },
+
+  async dashboard(): Promise<Dashboard> {
+    const { data } = await http.get('/outreach/dashboard');
+    return data as Dashboard;
   },
 };

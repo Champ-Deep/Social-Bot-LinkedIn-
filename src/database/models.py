@@ -33,8 +33,11 @@ def import_all_models() -> None:
     from src.tenancy import models as _tenancy  # noqa: F401
     from src.accounts import models as _accounts  # noqa: F401
 
+    # Targeting + outreach (ICP, prospects, suggestions)
+    from src.targeting import models as _targeting  # noqa: F401
+    from src.outreach import models as _outreach  # noqa: F401
+
     # Registered as they are added:
-    # from src.icp import models as _icp  # noqa: F401
     # from src.ingestion import models as _ingestion  # noqa: F401
     # from src.content import models as _content  # noqa: F401
     # from src.sequences import models as _sequences  # noqa: F401

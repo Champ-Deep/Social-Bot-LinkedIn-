@@ -8,11 +8,12 @@ export default {
     extend: {
       colors: {
         // Base tokens referenced by index.css (@apply border-border, etc.).
-        border: '#e2e8f0',
-        input: '#e2e8f0',
-        ring: '#0a66c2',
-        background: '#ffffff',
-        foreground: '#0f172a',
+        // Dark by default: deep navy canvas, slate cards, purple accent.
+        border: '#334155',
+        input: '#334155',
+        ring: '#a855f7',
+        background: '#0B0F19',
+        foreground: '#e2e8f0',
         linkedin: {
           50: '#e7f3ff',
           100: '#d0e7ff',

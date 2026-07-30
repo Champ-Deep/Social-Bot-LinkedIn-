@@ -26,6 +26,7 @@ class ActionType(str, Enum):
     POST = "post"
     FETCH_ACTIVITY = "fetch_activity"
     FETCH_INBOX = "fetch_inbox"
+    FETCH_PROFILE = "fetch_profile"
     WHOAMI = "whoami"
 
 
@@ -69,6 +70,7 @@ class LinkedInTransport(Protocol):
     async def create_post(self, account: Any, body: str, media: Any = None) -> TransportResult: ...
     async def fetch_activity(self, account: Any, member_urn: str) -> TransportResult: ...
     async def fetch_inbox(self, account: Any, since: Any = None) -> TransportResult: ...
+    async def fetch_profile(self, account: Any, public_id: str) -> TransportResult: ...
     async def whoami(self, account: Any) -> TransportResult: ...
 
 
@@ -83,5 +85,6 @@ ACTION_METHODS = (
     "create_post",
     "fetch_activity",
     "fetch_inbox",
+    "fetch_profile",
     "whoami",
 )

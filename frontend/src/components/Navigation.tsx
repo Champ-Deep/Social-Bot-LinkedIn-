@@ -1,79 +1,74 @@
 import { Link, useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { LayoutDashboard, Activity, Settings } from 'lucide-react';
+import { Activity, Inbox, LayoutDashboard, Target, Users } from 'lucide-react';
 import { clsx } from 'clsx';
+import { outreachApi } from '@/lib/api';
 
 const navItems = [
-  {
-    path: '/campaigns',
-    label: 'Campaigns',
-    icon: LayoutDashboard,
-  },
-  {
-    path: '/agents',
-    label: 'Agents',
-    icon: Activity,
-  },
+  { path: '/dashboard', label: 'Overview', icon: LayoutDashboard },
+  { path: '/approvals', label: 'Approvals', icon: Inbox, badge: true },
+  { path: '/targeting', label: 'Targeting', icon: Target },
+  { path: '/accounts', label: 'Accounts', icon: Users },
+  { path: '/agents', label: 'Agents', icon: Activity },
 ];
 
 export function Navigation() {
   const location = useLocation();
 
+  // The pending count lives in the nav because it is the one number that
+  // should pull the user back into the product.
+  const { data: dashboard } = useQuery({
+    queryKey: ['dashboard'],
+    queryFn: outreachApi.dashboard,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const pending = dashboard?.totals?.pending_review ?? 0;
+
   return (
-    <nav className="bg-white shadow-sm border-b border-gray-200">
+    <nav className="bg-slate-900/80 backdrop-blur border-b border-slate-800 sticky top-0 z-40">
       <div className="max-w-7xl mx-auto px-4">
-        <div className="flex items-center justify-between h-16">
-          {/* Logo */}
-          <Link to="/" className="flex items-center gap-2">
+        <div className="flex items-center justify-between h-16 gap-4">
+          <Link to="/" className="flex items-center gap-2 shrink-0">
             <motion.div
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              className="text-2xl font-bold bg-gradient-to-r from-linkedin-500 to-linkedin-600 bg-clip-text text-transparent"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.97 }}
+              className="text-lg font-bold bg-gradient-to-r from-purple-400 to-amber-300 bg-clip-text text-transparent"
             >
-              LinkedIn Automation
+              Social Bot
             </motion.div>
           </Link>
 
-          {/* Navigation Links */}
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 overflow-x-auto">
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = location.pathname.startsWith(item.path);
+              const showBadge = item.badge && pending > 0;
 
               return (
                 <Link key={item.path} to={item.path}>
                   <motion.div
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
+                    whileHover={{ scale: 1.03 }}
+                    whileTap={{ scale: 0.97 }}
                     className={clsx(
-                      'flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors',
+                      'relative flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap',
                       isActive
-                        ? 'bg-linkedin-50 text-linkedin-600'
-                        : 'text-gray-600 hover:bg-gray-100'
+                        ? 'bg-purple-500/15 text-purple-300'
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200',
                     )}
                   >
-                    <Icon size={20} />
-                    <span>{item.label}</span>
-                    {isActive && (
-                      <motion.div
-                        layoutId="activeTab"
-                        className="absolute bottom-0 left-0 right-0 h-0.5 bg-linkedin-500"
-                        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-                      />
+                    <Icon size={17} />
+                    <span className="hidden sm:inline">{item.label}</span>
+                    {showBadge && (
+                      <span className="ml-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-purple-500 text-white text-[11px] font-semibold flex items-center justify-center">
+                        {pending}
+                      </span>
                     )}
                   </motion.div>
                 </Link>
               );
             })}
-
-            {/* Settings */}
-            <motion.button
-              whileHover={{ scale: 1.05, rotate: 90 }}
-              whileTap={{ scale: 0.95 }}
-              className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg ml-4"
-            >
-              <Settings size={20} />
-            </motion.button>
           </div>
         </div>
       </div>
