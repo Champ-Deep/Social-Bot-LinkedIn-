@@ -11,7 +11,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import accounts, agents, campaigns, me, outreach, targeting
@@ -98,9 +98,50 @@ app.include_router(outreach.router, prefix=API_V1_PREFIX)
 
 
 @app.get("/healthz", tags=["system"])
-async def healthz() -> dict:
-    """Liveness probe."""
-    return {"status": "ok"}
+async def healthz(request: Request) -> dict:
+    """
+    Liveness probe plus a readiness summary of the optional components.
+
+    Always 200 so the platform healthcheck reflects "the process is up", while
+    ``components`` tells an operator what the app can actually *do* right now.
+    The distinction matters here: without Redis the per-account caps cannot be
+    enforced globally, so sending is refused — and that is a very different
+    state from "broken", which is why it needs to be visible rather than
+    inferred from behavior.
+    """
+    components: dict = {"api": "ok"}
+
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        components["redis"] = "not configured"
+    else:
+        try:
+            await redis.ping()
+            components["redis"] = "ok"
+        except Exception as exc:  # pragma: no cover - depends on runtime env
+            components["redis"] = f"error: {exc}"
+
+    try:
+        from src.database.session import engine
+
+        async with engine.connect():
+            components["database"] = "ok"
+    except Exception as exc:  # pragma: no cover - depends on runtime env
+        components["database"] = f"error: {exc}"
+
+    components["credentials_encryption"] = (
+        "ok" if os.getenv("ENCRYPTION_KEY") else "no ENCRYPTION_KEY (cannot connect accounts)"
+    )
+    components["llm"] = (
+        "openrouter" if os.getenv("OPENROUTER_API_KEY") else "templates (no OPENROUTER_API_KEY)"
+    )
+    components["sending"] = (
+        "enabled"
+        if components["redis"] == "ok" or os.getenv("ALLOW_UNCAPPED_SENDING", "").lower() == "true"
+        else "disabled (caps cannot be enforced without Redis)"
+    )
+
+    return {"status": "ok", "components": components}
 
 
 def _mount_frontend() -> None:
