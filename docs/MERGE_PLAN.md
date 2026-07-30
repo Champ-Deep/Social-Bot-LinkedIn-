@@ -307,13 +307,55 @@ half.
 
 ---
 
-## 9. What I'd want decided before starting
+## 9. Decisions (settled)
 
-1. **Auth** — LinkedIn OAuth, or keep Clerk? (Recommendation: OAuth.)
-2. **Repo** — confirm B2B Pulse is the base and this repo becomes reference.
-3. **Scope of multi-platform** — Instagram and Facebook exist in B2B Pulse. Do
-   the personas and warm-up need to cover them, or is LinkedIn the only surface
-   that matters for now? This meaningfully changes Phase 4's size.
-4. **Approval appetite** — right now our outbound requires approval on every
-   touch. With five accounts that's five queues. Is per-account approval right,
-   or should an admin be able to approve in bulk for accounts they trust?
+| Question | Decision | Notes |
+|---|---|---|
+| **Auth** | **Clerk** | Chosen over my LinkedIn-OAuth recommendation. Trade accepted: onboarding gains a second step (sign in, then connect LinkedIn), and in exchange login survives a LinkedIn session expiring, works for admins who never connect an account, and stays independent of the platform we automate. LinkedIn OAuth is retained purely as integration-connect. |
+| **Base repo** | **B2B Pulse** | This repo becomes reference. |
+| **Platforms** | **LinkedIn first, Meta in V2** | Instagram and Facebook code stays in place and keeps working; personas, warm-up and the safety layer target LinkedIn only for now. Shrinks Phase 4 materially. |
+| **Approval model** | **Bulk for engagement, per-account for messaging** | See below — this one has real design consequences. |
+
+### What the approval split means
+
+Splitting approval by action type rather than by account is the right call, and
+it changes more than it looks:
+
+**Engagement (likes, comments) — bulk approve.** An admin sees one queue across
+all five accounts and can approve in a sweep. This is what makes the LakeB2B
+case workable: five separate comment queues would go unread by Friday, and an
+unread queue is the same as no review at all.
+
+The safety consequence: bulk approval removes the per-item human pause that was
+implicitly slowing engagement down. **The cluster-safety work in Phase 3 stops
+being a nice-to-have and becomes load-bearing**, because a single click can now
+approve five accounts commenting on the same post. Participation sampling has
+to run *before* the queue is built, not after approval — the admin should be
+approving "these three accounts engage with this post", never "all five do".
+
+**Messaging (invitations, DMs) — per account.** Correct, and worth the
+friction. A direct message goes out under one named person's identity, in their
+voice, to someone who will reply to *them*. Nobody should be able to bulk-send
+messages as five colleagues. Volume also makes this tractable: caps hold
+invitations to ~15/day per account, so a per-account queue stays small enough
+to actually read.
+
+Practical shape:
+
+```
+Engagement queue    org-wide, grouped by post, bulk approve
+                    → sampled to a subset of accounts before it is shown
+Messaging queue     per account, reviewed by that account's owner
+                    → admin can see all of them, but approves within one
+```
+
+---
+
+## 10. Status
+
+- ✅ **Phase 1 complete** — branch `claude/merge-social-bot-phase-1` in B2B Pulse.
+  Clerk auth, extended account model + migration, transport layer with the
+  browser path bound as fallback. 110 tests passing (was 67, with 9 failures
+  and 7 errors on the baseline).
+- ⏭ **Phase 2 next** — port the safety layer. Urgent: B2B Pulse drives real
+  accounts today with stagger delays as its only protection and no warm-up.
