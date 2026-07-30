@@ -15,16 +15,21 @@ and how the **admin dashboard** aggregates activity across all accounts.
 ## 0. TL;DR for the impatient
 
 - The **web service** (FastAPI API + React SPA) is **REAL and deployed** on
-  Railway with Postgres. Identity/tenancy (Clerk), campaign CRUD, global
-  rate-limiter, OpenRouter LLM provider, and the transport *interfaces* are done
-  and unit-tested (46 tests).
-- **No LinkedIn action executes end-to-end yet.** The mobile transport is a
-  SCAFFOLD (falls back to Playwright), the Playwright executor is not bound, and
-  the agent runtime's session bridge is BROKEN. Making it work for **one person**
-  is the immediate next milestone — see §4 and §11.
-- Multi-account is modeled (Org → User → ConnectedAccount) and ready to build on.
-  The admin-dashboard aggregation and per-account worker containerization are
-  PLANNED with a concrete design in §7–§8.
+  Railway with Postgres and Redis. Identity/tenancy (Clerk), campaign CRUD,
+  global rate-limiter and the OpenRouter LLM provider are done (99 tests).
+- **The outreach loop is REAL and end-to-end**: connect account → define ICP →
+  import people → agent suggests who to contact and what to say → a human
+  approves/edits/rejects → paced send under a global per-account cap. This is
+  the product's spine; see §4a. Nothing reaches LinkedIn without an approval.
+- **The mobile transport now calls real Voyager endpoints** (whoami, invite,
+  message, like, comment, post, profile, inbox) over a TLS-fingerprinted
+  session with a stable per-account device identity, with Playwright as the
+  fallback. It is validated against a recording transport in tests but has not
+  yet been proven against a live LinkedIn account — see §4 for exactly what
+  that means.
+- Multi-account is modeled *and used* (Org → User → ConnectedAccount), and the
+  admin dashboard aggregates across accounts today (`GET /outreach/dashboard`).
+  Per-account worker containerization remains PLANNED — design in §8.
 
 ---
 
@@ -43,9 +48,14 @@ Two processes, one Redis, one Postgres:
 - **API ↔ agents coupling is Redis-only.** The API never touches the agents'
   in-memory objects. It publishes commands and consumes `events:*`. This is the
   seam that makes multi-account/multi-worker scaling clean.
-- **Deployed today:** only the **web service**. The agent runtime is not yet
-  deployed (and Redis isn't attached), which is why campaign *execution* is a
-  no-op in production even though CRUD works.
+- **Deployed today:** the **web service**, with Postgres and Redis attached.
+  The outreach loop runs entirely inside it — generation, approval and sending
+  are all synchronous API calls, so it works without the agent runtime. The
+  agent runtime (which will drive *scheduled* sending via `execute.run_due`)
+  is not yet deployed, so today a due send is triggered by
+  `POST /outreach/accounts/{id}/run` rather than a background tick.
+- `GET /healthz` reports component readiness (redis, database, encryption key,
+  LLM, and whether sending is enabled) — check it first when something is off.
 
 Key modules:
 | Area | Path | Status |
@@ -53,12 +63,19 @@ Key modules:
 | FastAPI app + SPA serving | `src/api/main.py` | REAL |
 | Campaign CRUD | `src/campaigns/*`, `src/api/routes/campaigns.py` | REAL |
 | Identity/tenancy (Clerk) | `src/api/middleware/clerk.py`, `src/tenancy/*` | REAL |
-| Connected accounts model | `src/accounts/models.py` | REAL (model), routes PLANNED |
+| Connected accounts | `src/accounts/*`, `src/api/routes/accounts.py` | REAL |
+| Credential encryption (Fernet) | `src/accounts/crypto.py` | REAL |
+| Caps & pacing policy | `src/accounts/caps.py`, `src/outreach/pacing.py` | REAL |
+| ICP + relevance scoring | `src/targeting/*` | REAL |
+| Suggestion engine | `src/outreach/suggest.py` | REAL |
+| Copy quality gate (anti-spam) | `src/outreach/quality.py` | REAL |
+| Humanistic copywriting | `src/outreach/copy.py` | REAL (LLM + template fallback) |
+| Approve / paced send executor | `src/outreach/execute.py` | REAL |
 | Global rate limiter | `src/infrastructure/rate_policy.py` | REAL |
 | OpenRouter LLM (2 slots) | `src/infrastructure/llm/*` | REAL |
 | Campaign→agent bridge | `src/infrastructure/task_bridge.py` | REAL |
 | Transport interface + router | `src/infrastructure/api_client.py`, `transports/*` | REAL interface |
-| Mobile transport endpoints | `src/infrastructure/transports/mobile.py` | SCAFFOLD |
+| Mobile transport endpoints | `src/infrastructure/transports/mobile.py` | REAL, unvalidated live |
 | Playwright transport | `src/infrastructure/transports/playwright.py` | REAL adapter, not bound |
 | Agent runtime | `src/agents/*`, `src/infrastructure/orchestrator.py` | mixed (see §4) |
 | Skeleton agents | `safety/scheduler/whatsapp_monitor/analytics_agent.py` | SCAFFOLD |
@@ -112,51 +129,106 @@ Organization (the admin's workspace / Clerk org)
 
 ## 4. The mobile system — honest status (READ THIS)
 
-**Question: is it working with the mobile system?** Not yet — here's exactly
-where it stands so there are no surprises.
+**Question: is it working with the mobile system?** The endpoints are now real
+code rather than scaffolding, but they have not yet been exercised against a
+live LinkedIn account. Precisely:
 
-What's REAL:
+What's REAL and tested:
 - `LinkedInTransport` protocol and the `CompositeTransport` router
   (`api_client.py`): tries mobile first, falls back to Playwright on
-  `TransportUnavailable`/`TransportChallenge`. Unit-tested.
+  `TransportUnavailable`/`TransportChallenge`.
 - Per-account **device fingerprint** generation (stable UA / device-id / OS /
   app-version + curl_cffi TLS-impersonation profile): `transports/fingerprints.py`.
-- Mobile **session builder** (`MobileAPITransport.build_session`): a real
-  curl_cffi session with fingerprint headers, TLS impersonation, proxy, and the
-  account's auth cookie.
+- Mobile **session builder**: a curl_cffi session with fingerprint headers, TLS
+  impersonation, proxy, cookies, and the `csrf-token` header Voyager requires
+  (its value must equal the `JSESSIONID` cookie — a common thing to get wrong).
+- **All action methods are implemented** against Voyager: `whoami`,
+  `fetch_profile`, `connect`, `send_message`, `like`, `comment`, `create_post`,
+  `fetch_activity`, `fetch_inbox`. Each tries the current-generation ("dash")
+  endpoint and then the legacy one before giving up and falling back.
+- Auth failures (401/403) and throttling (429/999) raise `TransportChallenge`,
+  which pauses the account rather than retrying into a restriction.
 
-What's SCAFFOLD / not done:
-- The mobile **action endpoints** (`like`, `comment`, `connect`, `send_message`,
-  `create_post`, `fetch_activity`, `fetch_inbox`, `whoami`) currently raise
-  `TransportUnavailable` — i.e. they are not implemented against LinkedIn's real
-  mobile API. They exist as clearly-marked slots.
-- The **Playwright fallback executor is not bound** (`get_transport(...,
-  playwright_executor=None)`), so the fallback also can't act yet.
-- The agent runtime's **session bridge is BROKEN**:
-  `InteractionAgent._wait_for_response` is a stub ("simplified version"), so the
-  agent can't obtain a browser session either.
+What is NOT yet proven:
+- **No live-account validation.** Voyager is undocumented and its request
+  shapes drift; the endpoint bodies here are written against the shapes the
+  first-party clients use, but until they run against a real session we cannot
+  claim they work. Expect to iterate on the exact payloads.
+- The **Playwright fallback executor is still not bound**
+  (`get_transport(..., playwright_executor=None)`), so if a mobile shape is
+  wrong today the fallback cannot rescue it — the action fails cleanly and the
+  suggestion is marked `failed` with the error recorded.
+- The agent runtime's session bridge (`InteractionAgent._wait_for_response`)
+  remains BROKEN, so the *agent-runtime* path still can't act. The outreach
+  loop does not depend on it — it calls transports directly from the API.
 
-**Net:** calling `get_transport(account).like(...)` today returns
-`success=False`. No like/comment/connect/DM/post actually happens on LinkedIn
-through any path yet. The plumbing and safety rails are in place; the "last mile"
-(real endpoint calls, or bound Playwright + fixed session bridge) is the work.
-
-**Fastest route to "works for one person"** (recommended order):
-1. Bind a **PlaywrightTransport executor** to a live logged-in session for a
-   single ConnectedAccount, and implement `like`/`comment`/`connect`/
-   `send_message` via the existing `_execute_*_playwright` methods in
-   `interaction_agent.py`. This gives a working vertical slice fast.
-2. In parallel, implement the **mobile** `like`/`comment` against LinkedIn's
-   Voyager/mobile endpoints and validate against that one real account; keep
-   Playwright as the automatic fallback.
-3. Fix `_wait_for_response` (BaseAgent correlation futures) so the agent-runtime
-   path also works, then wire campaigns → bridge → interaction agent end-to-end.
+**How to validate against a real account** (this is the next concrete step):
+1. Connect a real account via `POST /api/v1/accounts` with a live `li_at` +
+   `JSESSIONID`. The response `status` tells you immediately whether `whoami`
+   worked — that alone validates session construction, headers and CSRF.
+2. Import one target, generate a suggestion, approve it, and `POST .../send`.
+   Watch `suggestion.result.detail.shape` to see which endpoint generation
+   answered, or `suggestion.error` for the failure from every shape tried.
+3. Fix payloads as needed. Because each action tries multiple shapes and the
+   composite falls back, a wrong guess degrades to a clean failure rather than
+   a corrupted send.
+4. Then bind the Playwright executor as the safety net for shapes that break.
 
 Ban-risk posture (why mobile-first): mobile-API traffic with stable per-account
 fingerprints + the global daily caps (§5) is far lower risk than headless
 Chromium. Playwright stays as the fallback only.
 
 ---
+
+## 4a. The outreach loop — the product's spine
+
+The path from "we have a list of people" to "a message was sent" runs entirely
+through these modules, and every one of them is a place where the system can
+decide *not* to act:
+
+```
+  targeting/scoring.py     is this the right person?        -> score + reasons
+        │  (below the ICP floor, or excluded -> stop)
+        ▼
+  outreach/copy.py         what would we say to them?       -> draft
+        │  (LLM via OpenRouter content slot; templates if no key)
+        ▼
+  outreach/quality.py      is this copy fit to send?        -> blockers/warnings
+        │  (blockers -> stored as `blocked`, never shown as ready)
+        ▼
+  outreach/suggest.py      should we ask the user at all?   -> OutreachSuggestion
+        │  (dedupe, remaining caps, daily approval budget)
+        ▼
+  ── HUMAN APPROVES / EDITS / REJECTS ──   (an edit is re-checked by the gate)
+        │
+        ▼
+  outreach/pacing.py       when may it fire?                -> scheduled_for
+        │  (active hours, cooldown, jitter)
+        ▼
+  outreach/execute.py      send it                          -> transport call
+           re-checks: approved? due? in hours? copy still clean? under caps?
+```
+
+Design notes worth preserving:
+
+- **Scoring is deterministic, not a model call.** Every suggestion can explain
+  itself ("Title matches 'head of growth'"), the same person always scores the
+  same, and inference cost is spent only on the few who survive. An ICP with no
+  criteria matches *nobody* — it fails closed.
+- **The quality gate is rules-based on purpose.** A model asked "is this spammy?"
+  approves its own output. Leaked `{{placeholders}}`, booking links, pitches in
+  connection notes and over-length copy are blockers; tired phrasing, generic
+  openers and sender-focused copy are scored penalties surfaced to the reviewer.
+- **A human edit is not an exemption.** `approve(edited_text=...)` runs the same
+  gate; a person pasting a Calendly link is refused exactly like a model doing it.
+- **The daily approval budget** (default 20/account) exists because a 200-item
+  queue gets rubber-stamped, which is identical to having no review at all.
+- **Caps are checked twice**: once when building the queue (so we don't suggest
+  what can't be sent) and again at send time against the live Redis counters,
+  which is the authoritative check. A refusal never consumes allowance.
+- **Suppression is permanent.** Rejecting with `suppress_target` puts a person
+  out of reach of every future suggestion, for every action, regardless of ICP
+  changes.
 
 ## 5. Rate limiting — real, global, per-account
 
@@ -236,13 +308,30 @@ vertical slice (§4), then shard to per-account workers.
 
 ## 9. Current API surface (implemented)
 
-`/healthz`; `/api/v1/me` (auth); `/api/v1/agents` (stub data);
-`/api/v1/campaigns` CRUD + `/start` `/pause` `/status` `/tasks`. Full request/
-response shapes in the Frontend Handoff. OpenAPI at `/docs`.
+`/healthz` (with component readiness); `/api/v1/me`; `/api/v1/agents` (stub
+data); `/api/v1/campaigns` CRUD + `/start` `/pause` `/status` `/tasks`.
 
-Known gaps to close: campaigns are **not org-scoped/authed yet** (add
+**Accounts** — `POST /accounts` (connect + verify), `GET /accounts`,
+`GET|PATCH|DELETE /accounts/{id}`, `POST /accounts/{id}/credentials` (rotate
+cookies), `POST /accounts/{id}/verify`.
+
+**Targeting** — `POST|GET /targeting/icps`, `PATCH|DELETE /targeting/icps/{id}`,
+`POST /targeting/preview` (score a hypothetical person against a draft ICP,
+saves nothing, unauthenticated), `POST|GET /targeting/targets`,
+`POST /targeting/targets/{id}/suppress`.
+
+**Outreach** — `POST /outreach/suggestions` (generate), `GET
+/outreach/suggestions`, `GET /outreach/suggestions/{id}`,
+`POST /outreach/suggestions/{id}/approve|reject|send`,
+`POST /outreach/accounts/{id}/run` (execute everything due),
+`GET /outreach/activity`, `GET /outreach/dashboard` (multi-account roll-up).
+
+All of the above are org-scoped and require auth. Full request/response shapes
+in the Frontend Handoff. OpenAPI at `/docs`.
+
+Known gaps to close: **campaigns** are still not org-scoped/authed (add
 `Depends(get_request_context)` + filter by `org_id`); the WS server is not
-implemented; `/api/v1/accounts` and the vision endpoints are PLANNED.
+implemented, so the UI polls.
 
 ---
 
@@ -252,30 +341,41 @@ implemented; `/api/v1/accounts` and the vision endpoints are PLANNED.
   SPA + API on `$PORT`. `railway.json` sets the start command (shell-wrapped so
   `$PORT` expands) and `/healthz` healthcheck.
 - **Live:** Railway project "Social Bot" / production / service `social-bot-web`
-  + Postgres. URL: `https://social-bot-web-production.up.railway.app`.
+  + Postgres + Redis. URL: `https://social-bot-web-production.up.railway.app`.
 - **Env vars** (see `.env.example`): `DATABASE_URL` (Railway Postgres) or
   `USE_SQLITE=true`; `AUTO_CREATE_TABLES=true`; optional `REDIS_URL`;
   `CLERK_JWKS_URL`/`CLERK_ISSUER` + `VITE_CLERK_PUBLISHABLE_KEY`;
   `OPENROUTER_API_KEY` (+ model slots); `MOBILE_TRANSPORT_ENABLED`.
+- **`ENCRYPTION_KEY` is required to connect accounts** (Fernet key; credentials
+  are encrypted at rest with it). Rotating it makes existing stored cookies
+  undecryptable — accounts then need `POST /accounts/{id}/credentials`.
+- **Sending is refused without Redis**, because the per-account caps cannot be
+  enforced globally without it. `ALLOW_UNCAPPED_SENDING=true` overrides this;
+  don't, outside local testing.
 - **Agent runtime** is a separate process (`python main.py --agents ...`) not yet
   deployed; deploy it as a second Railway service with Redis attached to activate
   execution.
-- **Tests:** `USE_SQLITE=true pytest` (46 passing). CI-friendly, no external
-  services (fakeredis + injected Clerk JWKS + mocked transport).
+- **Tests:** `pytest` (99 passing). CI-friendly, no external services —
+  in-memory SQLite, fakeredis, injected Clerk JWKS, and a recording transport
+  (`tests/conftest.py`) that captures what *would* have been sent.
 
 ---
 
 ## 11. Recommended next steps (ordered)
 
-1. **Vertical slice for one account** (§4 step 1): accounts CRUD + connect flow,
-   bind Playwright executor, execute like/comment/connect/DM for one real
-   account under the global caps. Proves the whole loop.
-2. Fix `_wait_for_response` (BaseAgent correlation futures); wire campaigns →
-   bridge → interaction agent; deploy the agent runtime + Redis.
-3. WebSocket server (`/ws/updates`, `/ws/campaigns/{id}`) + `ACCOUNT_*` events.
-4. Org-scope + auth the campaign routes; add `/api/v1/accounts`, `/icps`,
-   `/settings/models`.
-5. Admin dashboard aggregation endpoints + AnalyticsAgent rollups (§7).
-6. Mobile endpoint implementation (§4 step 2), account by account.
+1. **Validate the mobile endpoints against one real account** (§4). This is the
+   single highest-value next step: everything else is built and tested, and this
+   is the only thing standing between the loop and real sends.
+2. **Bind the Playwright executor** as the fallback, so a drifted Voyager shape
+   degrades to a slower send rather than a failure.
+3. **Deploy the agent runtime** and have `scheduler_agent` call
+   `execute.run_due` on a tick, so approved outreach fires on its paced schedule
+   instead of needing `POST /outreach/accounts/{id}/run`.
+4. **Detect invitation acceptance** (poll connections via `fetch_activity`/
+   inbox) to flip targets to `connected`, which is what unlocks the
+   connect → wait → follow-up-message sequence the engine already supports.
+5. WebSocket server (`/ws/updates`) so the approval queue updates live instead
+   of polling.
+6. Org-scope + auth the legacy campaign routes.
 7. Per-account worker containerization (§8); WhatsApp ingestion; smart inbox;
    content calendar/coaching. (Full phasing in the plan file.)

@@ -153,32 +153,80 @@ For the admin dashboard we'll extend this with `ACCOUNT_STATUS` and
 
 ## 6. What is real vs not (be honest with the UI)
 
-- **Real & persisted:** identity/tenancy, campaign CRUD (against Postgres),
-  idempotency, agent-monitor shape.
-- **Not executing yet:** starting a campaign enqueues work, but no LinkedIn
-  action actually runs — the agent runtime isn't attached to the deployment and
-  the interaction transport is still a scaffold (see the Backend Handoff). Treat
-  campaign execution as "queued" in the UI; don't promise completed actions.
-- **Not built yet:** everything in §7–§8 (accounts, settings, ICP, inbox,
-  content calendar, admin aggregation) and the WebSocket server.
+- **Real, persisted, and shipped in the SPA:** identity/tenancy; connected
+  accounts (connect, verify, rotate credentials, caps, mode); ICP definition
+  with live scoring preview; target import; the **approval queue** (generate →
+  review → edit → approve/reject → send); the multi-account overview and the
+  activity feed. Screens: `Dashboard`, `Approvals`, `Targeting`, `Accounts`.
+- **Real but unvalidated against live LinkedIn:** the send itself. The mobile
+  (Voyager) endpoints are implemented and the approval loop drives them, but
+  they haven't been proven against a real account yet — see Backend Handoff §4.
+  A failed send surfaces on the suggestion as `status: 'failed'` with `error`
+  populated, so the UI should show that rather than assume success.
+- **Real but polled, not pushed:** there's no WebSocket server, so the
+  Approvals and Dashboard screens refetch on an interval. When `/ws/updates`
+  lands (§5), swap the polling for the existing `useWebSocket` hook.
+- **Legacy / superseded:** the campaign CRUD screens still work but are not the
+  product's spine any more — campaign execution still doesn't run, and campaigns
+  are not yet org-scoped. Don't build new surface area on them; the outreach
+  loop replaces them.
+- **Not built yet:** settings (model slots, WhatsApp number), the smart inbox,
+  and the content calendar — §7's remaining contracts.
 
 ---
 
-## 7. Proposed endpoints — connect accounts, direction, settings
+## 7. Endpoints — connect accounts, targeting, approvals
 
-These are the contracts to design the UI around. They map 1:1 to models that
-already exist in the backend (`ConnectedAccount`, `Organization`, planned
-`ICPProfile` / `OrgModelSettings`).
+Everything in this section marked BUILT is live now; the typed client for all of
+it is in `frontend/src/lib/api.ts` (`accountApi`, `targetingApi`, `outreachApi`)
+and the types are in `frontend/src/types/index.ts`.
 
-### Connected accounts (the heart of multi-account)
+### Connected accounts — BUILT (the heart of multi-account)
 ```
-POST   /api/v1/accounts            connect a LinkedIn account
-GET    /api/v1/accounts            list this org's connected accounts
-GET    /api/v1/accounts/{id}       one account (status, mode, icp, caps, last_post_at)
-PATCH  /api/v1/accounts/{id}       set mode / active ICP / daily caps / proxy
-DELETE /api/v1/accounts/{id}       disconnect
-POST   /api/v1/accounts/{id}/reauth  refresh credentials when status=auth_required
+POST   /api/v1/accounts                  connect a LinkedIn account (+ verify)
+GET    /api/v1/accounts                  list this org's connected accounts
+GET    /api/v1/accounts/{id}             one account
+PATCH  /api/v1/accounts/{id}             set mode / active ICP / daily caps
+DELETE /api/v1/accounts/{id}             disconnect (destroys credentials)
+POST   /api/v1/accounts/{id}/credentials replace expired cookies, keep settings
+POST   /api/v1/accounts/{id}/verify      re-check the session against LinkedIn
 ```
+
+### Targeting — BUILT
+```
+POST/GET    /api/v1/targeting/icps            define who's worth talking to
+PATCH/DELETE /api/v1/targeting/icps/{id}
+POST        /api/v1/targeting/preview         score a hypothetical person, saves
+                                              nothing, no auth — use it for the
+                                              live ICP tuning experience
+POST/GET    /api/v1/targeting/targets         import / list prospects
+POST        /api/v1/targeting/targets/{id}/suppress   never contact, permanent
+```
+
+### Approvals — BUILT (the loop)
+```
+POST /api/v1/outreach/suggestions              generate today's review queue
+GET  /api/v1/outreach/suggestions?status=      list (default: pending)
+POST /api/v1/outreach/suggestions/{id}/approve {edited_text?, send_at?}
+POST /api/v1/outreach/suggestions/{id}/reject  {suppress_target?}
+POST /api/v1/outreach/suggestions/{id}/send    send now (still capped + gated)
+POST /api/v1/outreach/accounts/{id}/run        send everything currently due
+GET  /api/v1/outreach/activity                 what actually went out
+GET  /api/v1/outreach/dashboard                per-account roll-up
+```
+
+UI notes that matter for this loop:
+- `approve` returns **422** with a human-readable `detail` when the copy fails
+  the quality gate — including on a user's own edit. Surface that inline on the
+  card; it is the product telling the user something real, not an error state.
+- `send` returns **503** when Redis is unavailable, because caps can't be
+  enforced. Say so plainly rather than showing a generic failure.
+- Every suggestion carries `relevance_reasons` (why this person),
+  `quality_warnings` (what's weak about the copy) and `generated_by` (model or
+  template). Showing all three is what makes the queue trustworthy — don't hide
+  them to make the UI tidier.
+- `GenerateResult.skipped` explains who *didn't* make the cut and why. Showing
+  "suggested 6 of 40 reviewed" builds far more confidence than showing 6 alone.
 `ConnectedAccount` shape:
 ```ts
 interface ConnectedAccount {
@@ -199,13 +247,7 @@ fingerprint is generated per account for the mobile transport. The UI needs a
 "Connect account" form (cookie paste or credential capture) + a status chip that
 reflects `status` (e.g. `auth_required` → prompt re-auth).
 
-### ICP / direction
-```
-GET/POST /api/v1/icps            list/create ICP profiles (industries, titles, keywords, geo)
-PATCH/DELETE /api/v1/icps/{id}
-```
-
-### Settings (admin)
+### Settings (admin) — PLANNED
 ```
 GET/PUT /api/v1/settings/models   OpenRouter content + classification model per org
 GET/PUT /api/v1/settings/whatsapp admin WhatsApp number (org-wide link feed)
