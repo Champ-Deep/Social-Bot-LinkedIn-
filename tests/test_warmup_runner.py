@@ -5,7 +5,7 @@ stay inside its own rules while doing it.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pytest
 
@@ -93,6 +93,34 @@ async def _stage(db, account, key, days_ago=1):
     await db.refresh(account)
 
 
+def _busy_evening(account, stage_key, action="like", search_days=30):
+    """
+    Find an evening on which this account is actually scheduled to act.
+
+    Quiet days are a designed feature, not an accident: optional actions carry
+    a below-1.0 probability so a warming account has days where it does
+    nothing, because real people do. That makes "run the runner and assert it
+    acted" flaky by construction — roughly one run in five would land on a
+    quiet day.
+
+    So these tests pick a day the planner has actually scheduled work on,
+    rather than assuming every day has some. The quiet-day behaviour itself is
+    covered in test_warmup.py.
+    """
+    start = datetime.now(timezone.utc).date()
+    for offset in range(search_days):
+        day = start + timedelta(days=offset)
+        plan = planner.plan_day(account, day=day, stage_key=stage_key)
+        if any(item.action == action for item in plan.actions):
+            return datetime.combine(
+                day, time(hour=23, minute=30), tzinfo=timezone.utc
+            )
+    raise AssertionError(
+        f"no {action} scheduled for this account in {search_days} days — "
+        f"the planner is producing nothing, which is itself a bug"
+    )
+
+
 # ----------------------------------------------------------------------
 # It performs work
 # ----------------------------------------------------------------------
@@ -110,7 +138,7 @@ async def test_runner_likes_icp_posts(db, org, account, icp, rate_limiter):
         transport=transport,
         rate_limiter=rate_limiter,
         live=object(),
-        now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        now=_busy_evening(account, "observe", "like"),
     )
 
     likes = [c for c in transport.calls if c[0] == "like"]
@@ -127,7 +155,7 @@ async def test_performed_activity_is_recorded_for_graduation(
 
     await runner.run_today(
         db, account, transport=FeedTransport(), rate_limiter=rate_limiter,
-        live=object(), now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        live=object(), now=_busy_evening(account, "observe", "like"),
     )
 
     totals = await warmup_service.totals_for(db, account)
@@ -139,7 +167,7 @@ async def test_the_same_post_is_never_engaged_with_twice(
 ):
     await _targets(db, org, account, icp, count=1)
     await _stage(db, account, "observe")
-    evening = datetime.now(timezone.utc).replace(hour=18, minute=0)
+    evening = _busy_evening(account, "observe")
 
     transport = FeedTransport(posts=2)
     await runner.run_today(
@@ -173,7 +201,7 @@ async def test_runner_never_performs_a_locked_action(
     transport = FeedTransport()
     await runner.run_today(
         db, account, transport=transport, rate_limiter=rate_limiter,
-        live=object(), now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        live=object(), now=_busy_evening(account, "observe", "like"),
     )
 
     performed = {c[0] for c in transport.calls}
@@ -206,7 +234,7 @@ async def test_runner_refuses_to_act_without_a_rate_limiter(
     transport = FeedTransport()
     await runner.run_today(
         db, account, transport=transport, rate_limiter=None, live=object(),
-        now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        now=_busy_evening(account, "observe", "like"),
     )
 
     assert not [c for c in transport.calls if c[0] == "like"]
@@ -239,7 +267,7 @@ async def test_a_challenge_during_warmup_pauses_the_account(
     await runner.run_today(
         db, account, transport=FeedTransport(challenge=True),
         rate_limiter=rate_limiter, live=object(),
-        now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        now=_busy_evening(account, "observe", "like"),
     )
 
     assert account.status == "rate_limited"
@@ -255,7 +283,7 @@ async def test_failures_are_recorded_rather_than_silently_dropped(
 
     await runner.run_today(
         db, account, transport=FeedTransport(fail=True), rate_limiter=rate_limiter,
-        live=object(), now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        live=object(), now=_busy_evening(account, "observe", "like"),
     )
 
     rows = list(
@@ -293,7 +321,7 @@ async def test_comments_are_queued_for_approval_not_posted(
     transport = FeedTransport()
     result = await runner.run_today(
         db, account, transport=transport, rate_limiter=rate_limiter, live=object(),
-        now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        now=_busy_evening(account, "converse", "comment"),
     )
 
     # Nothing was actually commented on LinkedIn.
@@ -327,7 +355,7 @@ async def test_queued_comment_references_the_post_it_replies_to(
 
     await runner.run_today(
         db, account, transport=FeedTransport(), rate_limiter=rate_limiter,
-        live=object(), now=datetime.now(timezone.utc).replace(hour=18, minute=0),
+        live=object(), now=_busy_evening(account, "converse", "comment"),
     )
 
     queued = (
