@@ -351,11 +351,59 @@ Messaging queue     per account, reviewed by that account's owner
 
 ---
 
-## 10. Status
+## 10. Status — the merge is complete
 
-- ✅ **Phase 1 complete** — branch `claude/merge-social-bot-phase-1` in B2B Pulse.
-  Clerk auth, extended account model + migration, transport layer with the
-  browser path bound as fallback. 110 tests passing (was 67, with 9 failures
-  and 7 errors on the baseline).
-- ⏭ **Phase 2 next** — port the safety layer. Urgent: B2B Pulse drives real
-  accounts today with stagger delays as its only protection and no warm-up.
+All six phases are done, on branch `claude/merge-social-bot-phase-1` in B2B
+Pulse. **206 tests passing, no failures**, up from 67 at the start (which had
+9 failures and 7 errors). Migration chain linear across 11 revisions.
+
+| Phase | What landed | Where |
+|---|---|---|
+| 1 — Foundation | Clerk auth, extended account model, transport layer with the browser path bound as fallback | `core/clerk.py`, `transports/`, migration 008 |
+| 2 — Safety | Warm-up programme gating the engagement pipeline, autonomous on Beat | `warmup/`, `safety/`, migration 009 |
+| 3 — Cluster safety | Participation sampling, cluster caps, independent schedules, correlation monitoring | `safety/cluster.py` |
+| 4 — Personas | Org-level personas with per-account inheritance, wired into comment generation | `personas/`, migration 010 |
+| 5 — Outbound | ICP targeting, quality gate, sequences, the two-queue approval split | `outbound/`, migration 011 |
+| 6 — Admin console | One view over every account, plus org-level correlation and headroom | `api/console.py` |
+
+### The five collisions, resolved
+
+| # | Collision | Resolution |
+|---|---|---|
+| 1 | Auth | Clerk, with LinkedIn OAuth retained as integration-connect |
+| 2 | Account model | `IntegrationAccount` extended with fingerprint, caps, warm-up state, mode, proxy |
+| 3 | Comment generation | B2B Pulse's two-pass writer, with the persona prepended and the quality gate as arbiter |
+| 4 | Execution | `CompositeTransport` — Voyager primary, their Playwright actions bound as fallback |
+| 5 | Org model | Theirs (`Org → Team → User`), which is what makes the LakeB2B case work |
+
+### One rule that emerged during the work
+
+**Merging two controls must never loosen either.** It came up three times and
+was applied consistently each time:
+
+- Caps: the warm-up tier allows 60 likes/day, the pipeline allowed 50 — the
+  gate takes the stricter, so no established account silently gained headroom.
+- Guardrails: a person may add prohibitions, never remove an org one.
+- Autonomy: if the org says comments need approval, an account cannot decide
+  otherwise.
+
+### What is still not proven
+
+- **The Voyager endpoints have never run against a live LinkedIn account.**
+  They are written against the shapes first-party clients use, each action
+  tries the current then the legacy endpoint, and the browser path catches
+  what falls through — but expect to iterate on exact payloads. Preflight is
+  the safe way to find out: read-only, sends nothing.
+- **No OpenRouter key configured**, so copy falls back to templates. They are
+  plain but clear the quality gate.
+- **The frontend is backend-complete but not built.** Every console, warm-up
+  and approval endpoint exists and is tested; the React screens for them are
+  the remaining work.
+
+### Recommended next step
+
+Connect one real LakeB2B account and run preflight. It exercises session
+construction, TLS fingerprint, device headers, CSRF and response parsing
+without sending anything, and it is the only way to learn which Voyager shapes
+need fixing. Everything downstream is already gated behind warm-up, so that
+account cannot do anything hasty while you look.
