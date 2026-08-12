@@ -528,12 +528,10 @@ Known gaps to close: the WS server is not implemented, so the UI polls.
    is the only thing standing between the loop and real sends.
 2. **Bind the Playwright executor** as the fallback, so a drifted Voyager shape
    degrades to a slower send rather than a failure.
-3. **Deploy the agent runtime / a scheduled job** that, per account per day,
-   calls `warmup.service.today()` to get the activity plan and executes it,
-   then `outreach.sync.sync_account()` and `outreach.execute.run_due()`. Today
-   all three are available as API calls but nothing drives them on a tick, so
-   warm-up activity has to be triggered rather than just happening. **This is
-   the biggest remaining gap** — the programme is built but not yet autonomous.
+3. ~~Deploy the agent runtime / a scheduled job that drives warm-up, sync and
+   send on a tick.~~ **DONE** — `src/scheduler`, see §12. Off by default until
+   the mobile transport is validated (step 1); `SCHEDULER_ENABLED=true
+   SCHEDULER_DRY_RUN=true` shows what it would do without acting.
 4. ~~Bind the warm-up planner to real content.~~ **DONE** — `src/warmup/runner.py`
    draws engagement from the account's own ICP via `fetch_activity`, auto-runs
    likes/follows, and routes comments and posts to the approval queue.
@@ -548,3 +546,78 @@ Known gaps to close: the WS server is not implemented, so the UI polls.
 7. ~~Org-scope + auth the legacy campaign routes.~~ **DONE** — see §9.
 8. Per-account worker containerization (§8); WhatsApp ingestion; smart inbox;
    content calendar/coaching. (Full phasing in the plan file.)
+
+---
+
+## 12. The scheduler — what makes the programme autonomous
+
+`src/scheduler`, run as `python -m src.scheduler`. Every few minutes it sweeps
+every account, across every organization, and does three things per account:
+
+1. `outreach.sync.sync_account` — pull acceptance and reply state back
+2. `warmup.runner.run_today` — perform whatever the day's plan says is due
+3. `outreach.execute.run_due` — send approved suggestions that are due
+
+**The order is not alphabetical.** Sync runs first because it is what cancels a
+sequence when somebody has replied. Sending first would let a tick deliver a
+follow-up into a conversation that already had an answer waiting — the worst
+thing this product can do, because the prospect sees it. One tick's delay
+noticing a reply is acceptable; talking over it is not.
+
+**Why a plain loop rather than Celery or APScheduler.** The engine was already
+built to be ticked: `run_today` performs only what is due, subtracts work already
+done today and honours the pause flag; `run_due` filters on `scheduled_for` in
+SQL. So a missed tick is not a missed action and a duplicated tick is not
+duplicated activity, which removes the reasons to want cron semantics, misfire
+policy or a durable job store. A job store would also become a second source of
+truth about what should run, drifting from the DB whenever an account is paused
+or deleted.
+
+**Two things it refuses to do**, both in `src/scheduler/config.py`:
+
+- **Run when not explicitly enabled.** `SCHEDULER_ENABLED` defaults to false. It
+  drives real writes to real accounts, and step 1 above has not happened yet.
+- **Run live without Redis.** The caps are enforced by a Redis-backed limiter,
+  and it does **not** honour `ALLOW_UNCAPPED_SENDING`. That override exists for a
+  human pressing a button; an unattended loop with no ceiling is a different
+  decision, and it is how an account gets restricted. A dry run needs no Redis,
+  since it executes nothing.
+
+Refusals exit non-zero with an operator-facing explanation rather than idling — a
+process that is up but doing nothing is the state this module exists to prevent.
+
+**One ticker at a time.** A Redis lease (`scheduler:lease`, SET NX EX with an
+owner token and compare-and-delete release) means two concurrent sweeps cannot
+both see the same rate budget and both spend it. That is easy to arrange by
+accident — a second web replica with `SCHEDULER_IN_PROCESS` set, a worker
+deployed alongside one, or an overlapping deploy — and the symptom is *more
+activity*, not an error, so it is enforced in code rather than by convention.
+
+**Liveness is reported separately from output**, on `/healthz` as `scheduler` and
+`scheduler_last_tick`. This matters more than it sounds: the warm-up programme has
+deliberately quiet days (`observe` plans likes at `probability=0.8`, so one day in
+five does nothing, and the planner says *"A deliberately quiet day — real accounts
+have them"*). "No activity" is therefore never evidence of a fault, so absence of
+activity can never be the alarm — the scheduler has to assert its own aliveness.
+
+**Deploying it on Railway.** A second service from the same repo and image, with
+start command `python -m src.scheduler` and no healthcheck path (it serves no
+HTTP; use the heartbeat on the API's `/healthz` instead). It needs `DATABASE_URL`,
+`REDIS_URL`, `ENCRYPTION_KEY` and `SCHEDULER_ENABLED=true`. Do not set
+`SCHEDULER_IN_PROCESS` there — that is the local-development shape, and with more
+than one web replica it would put a ticker in each.
+
+Sync gets its own slower cadence (`SCHEDULER_SYNC_INTERVAL_SECONDS`, default 30
+minutes) because unlike the other two stages it always costs LinkedIn requests
+and can never return early. Cadence is tracked as a Redis key with a TTL — the
+key existing *means* "synced recently" — so there is no timestamp arithmetic and
+losing the record costs one extra read-only sync.
+
+Pacing: accounts are spaced within a sweep and the interval is jittered, because
+every account acting at `:00` and ticks landing on exact multiples of five minutes
+forever are both patterns, and not being a pattern is the entire premise.
+
+⚠️ **`SchedulerAgent` in `src/agents/core/` is not this.** It is a no-op skeleton
+kept so the legacy orchestrator can boot; its docstring now points here. The
+`docker-compose` service that used to run it (booting healthy and doing nothing)
+now runs the real scheduler.

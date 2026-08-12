@@ -8,10 +8,12 @@ that still needs a human decision. Append to it; don't rewrite history.
 - **Started:** 2026-08-10
 - **Last updated:** 2026-08-12
 - **Baseline:** commit `10f9fcd` (merge of product-roadmap branches)
-- **State:** changes 1–4d **done, verified and committed** on
-  `hardening/campaign-auth-and-migrations`. Change 5 is deferred until a
-  throwaway account exists. **Change 7 (the scheduler) is the active work** — it
-  needs no live account, so it is what keeps this moving meanwhile.
+- **State:** changes 1–4d and 7 **done, verified and committed** on
+  `hardening/campaign-auth-and-migrations`. The system is now autonomous but
+  shipped switched off (§5). Change 5 (live transport validation) is deferred
+  until a throwaway account exists and is the next action; change 8 (§5.4) is an
+  open question that should be answered before a non-UTC account runs
+  autonomously.
 
 > ### ✅ Committed as of 2026-08-12
 > The three-commit split described in §3.2 was made on branch
@@ -48,22 +50,36 @@ delicate live work.
 | 4b | Transport fallback no longer hides the primary error | **Done** | 1 new test + live probe |
 | 4c | One-command account validator (`scripts/validate_account.py`) | **Done** | 19 tests + 5 end-to-end checks |
 | 4d | `0002` aborts instead of deleting orphan campaigns | **Done** | 2 tests, incl. the recovery path |
+| 7 | Scheduler to drive warm-up / sync / send | **Done, off by default** | 30 tests + 2 refusal paths + a live dry run |
 | 5 | Validate mobile transport on a real account | **Deferred** | account to be obtained later |
-| 7 | Scheduler to drive warm-up / sync / send | **In progress** | — |
 | 6 | Bind the Playwright fallback executor | **Not started** | blocked behind 5 by design |
+| 8 | Planner ignores the account timezone (found in passing) | **Open — needs your call** | see §5.4 |
 
-Test suite: **193 passing.**
+Test suite: **223 passing.**
 Baseline before this work: 161 passing + 11 unreliable (~50% failure rate).
 Stability was measured at the time of change 3 — the previously flaky file passed
 10/10 runs and the whole suite 8/8. Nothing since has reintroduced clock or seed
 dependence.
 
-### Decisions — all resolved
+### Decisions
 
-**The destructive branch in migration `0002`: resolved 2026-08-12 — it aborts.**
+**Resolved — the destructive branch in migration `0002`, 2026-08-12: it aborts.**
 The user chose abort over delete. `0002` no longer deletes anything under any
 circumstances; with orphans and no organization to own them it fails the deploy
 and hands the operator the row count plus two ways forward. See §2.7.
+
+**Resolved — the scheduler's shape, 2026-08-12.** Separate worker process with an
+in-process flag for local dev; refuses to start without Redis; off by default with
+a dry-run mode. See §5.1.
+
+**Open — the planner ignores each account's configured timezone.** Found while
+building the scheduler. Every account's active window is 08:00–19:00 **UTC**
+regardless of `timezone`, so an account set to `America/Los_Angeles` is planned to
+act 00:00–11:00 local — overnight, every day, which is itself a detection
+signature. The fix is one argument, but it changes when every non-UTC account
+acts, so it is a behaviour change rather than a scheduler bug and is not bundled
+in. Full reasoning in §5.4. **Should be decided before the first non-UTC account
+runs autonomously.**
 
 ---
 
@@ -487,13 +503,20 @@ own eyes before trusting the success response.
 1. **Bind the Playwright fallback** (`get_transport(..., playwright_executor=None)`
    in `src/infrastructure/api_client.py`) — deliberately *after* 4.1, so it is
    bound against known-good behaviour rather than guesses.
-2. **A scheduler.** Nothing drives `warmup.runner.run_today`,
-   `outreach.sync.sync_account` or `outreach.execute.run_due` on a tick, and
-   `main.py` does not call them either — so deploying the agent runtime as-is
-   would not help. **This is the largest remaining gap:** the programme is fully
-   built but not autonomous, and today someone has to poke an endpoint for a
-   warm-up day to happen at all.
+2. ~~A scheduler.~~ **DONE, ahead of 4.1** — see §5. It needed no live account, so
+   it was brought forward when change 5 was deferred. Ships disabled; enabling it
+   is the natural first real exercise of the transport once 4.1 has passed.
 3. WebSocket server so the approval queue stops polling.
+
+**When you enable the scheduler for the first time**, the order that keeps it
+boring:
+
+1. `SCHEDULER_ENABLED=true SCHEDULER_DRY_RUN=true python -m src.scheduler` and
+   read a sweep. It touches no LinkedIn endpoint and needs no Redis.
+2. Decide §5.4 (the planner timezone) if the account is not UTC — otherwise its
+   first autonomous day runs overnight in local time.
+3. Turn off the dry run with a single account connected, and watch
+   `/healthz` → `scheduler_last_tick`.
 
 ### 4.3 Smaller things noticed but not done
 
@@ -503,14 +526,196 @@ own eyes before trusting the success response.
   (`frontend/src/lib/api.ts:176-182`) and the docs tell users to rotate there.
   `scripts/validate_account.py --rotate` covers it from the CLI meanwhile.
 - `proxy_url` and `timezone` are supported by the API and typed in
-  `frontend/src/types/index.ts`, but absent from the connect form.
+  `frontend/src/types/index.ts`, but absent from the connect form. (`timezone` is
+  worse than merely missing from the form — the planner ignores it entirely; see
+  §5.4.)
 - The mobile session follows redirects, so a bad cookie surfaces as a redirect
   loop rather than a clean 401 (see §2.5). Worth cleaning up *after* 4.1
   establishes a known-good baseline, not before.
 
 ---
 
-## 5. Change log
+## 5. Change 7 — the scheduler
+
+**Severity:** the largest remaining gap. **Status:** done, off by default.
+
+**The gap.** `warmup.runner.run_today`, `outreach.sync.sync_account` and
+`outreach.execute.run_due` were each reachable from exactly one HTTP route and
+nothing else. `main.py` never called them. So the programme was fully built and
+fully tested but **not autonomous**: a warm-up day only happened if somebody poked
+an endpoint.
+
+Confirmed rather than assumed: Railway's start command is `migrate && uvicorn` —
+the API process only. `requirements.txt` contains no scheduler of any kind.
+
+**And a trap.** `docker-compose.yml` had a `scheduler-agent` service running
+`main.py --agents scheduler`, which boots `SchedulerAgent` — a `SkeletonAgent`
+whose `_start_agent_tasks` returns `[]`. A container named `linkedin-scheduler`
+came up healthy and did nothing, while the class docstring described cadence and
+timing in convincing detail. Anyone reading either would conclude scheduling was
+handled. The service now runs the real scheduler and the docstring points at it.
+
+### 5.1 Decisions (yours, 2026-08-12)
+
+| Decision | Choice |
+|---|---|
+| Deployment shape | Separate worker process, with `SCHEDULER_IN_PROCESS` for local dev |
+| No Redis | Refuse to start |
+| Default on merge | Off, with a dry-run mode |
+
+### 5.2 Why a plain loop, not Celery or APScheduler
+
+The engine was already built to be ticked, and that removes most of what a
+scheduling framework offers. `run_today` performs only actions whose planned time
+has passed, subtracts work already done today, and honours the pause flag;
+`run_due` filters on `scheduled_for` in SQL. So a **missed tick is not a missed
+action** and a **duplicated tick is not duplicated activity**.
+
+That makes misfire policy, cron expressions and a durable job store answers to
+questions this system does not ask. A job store would additionally become a second
+source of truth about what should run, drifting from the database every time an
+account is paused or deleted — which then needs account-lifecycle events to
+reconcile. Celery was rejected on top of that for fighting the async SQLAlchemy
+stack and costing three processes to tick a handful of accounts.
+
+External cron over HTTP was rejected for a more concrete reason: there is no
+machine-auth concept. The routes need a Clerk JWT, `CLERK_DEV_UNSAFE` is local-only,
+and the endpoints are per-account — so it would have needed a service-token path
+plus a *publicly exposed* cross-org endpoint, which is more attack surface than the
+in-process query it replaced.
+
+### 5.3 What was built
+
+```
+src/scheduler/__init__.py   the reasoning, in one place
+             config.py      env parsing + the two refusals
+             accounts.py    the one deliberately cross-tenant reader
+             lease.py       Redis lease: exactly one ticker
+             tick.py        one sweep
+             runner.py      the loop
+             heartbeat.py   liveness + sync cadence
+             __main__.py    python -m src.scheduler
+```
+
+**Stage order is load-bearing.** Sync, then warm-up, then send. Sync runs first
+because it is what cancels a sequence when somebody has replied; sending first
+would let a tick deliver a follow-up into a conversation that already had an
+answer waiting. That is the worst thing this product can do — the prospect sees
+it, and it is unmistakably robotic. One tick's delay noticing a reply is
+acceptable; talking over it is not.
+
+**Two refusals, both explicit.** Not enabled → exit 2 with instructions. Live
+without Redis → exit 2, and `ALLOW_UNCAPPED_SENDING` is deliberately **not**
+honoured: that override exists for a human pressing a button, and extending it to
+an unattended loop is a different decision. An uncapped autonomous sender is
+precisely how an account gets restricted. Refusals exit non-zero rather than
+idling, because a process that is up but doing nothing is the exact state this
+module exists to make unreachable.
+
+**The lease.** The rate limiter makes one sweep safe, not two concurrent ones —
+both can read the same usage window, conclude there is budget, and spend it. The
+symptom is *more activity*, not an error, and it is easy to arrange by accident (a
+second web replica with `SCHEDULER_IN_PROCESS`, a worker deployed beside one, an
+overlapping deploy). `SET NX EX` with an owner token, compare-and-delete release
+via Lua so a stalled ticker cannot delete its successor's claim, and the TTL is
+the recovery story: a crashed ticker's claim expires and the next process takes
+over with nothing to clean up.
+
+**Liveness is reported separately from output**, and this is the subtle one. The
+warm-up programme has *deliberately* quiet days — `observe` plans likes at
+`probability=0.8`, so one day in five an account does nothing and the planner
+records *"A deliberately quiet day — real accounts have them."* (This is what made
+the tests in §2.3 flaky.) So "nothing happened" is normal, absence of activity can
+never be the alarm, and a dead scheduler is indistinguishable from a quiet one
+unless it asserts its own aliveness. Hence `scheduler` and `scheduler_last_tick`
+on `/healthz`.
+
+**Cadence.** Warm-up and send run every tick because both return on a DB-only path
+when nothing is due (verified: `run_today` returns before `_live_account`, and
+`run_due`'s empty result set never builds a transport). Sync gets its own slower
+clock, because it always costs LinkedIn requests and can never return early. Its
+cadence is a Redis key with a TTL — existence *means* "synced recently" — so there
+is no timestamp arithmetic and losing the record costs one extra read-only sync.
+
+**Pacing.** Accounts are spaced within a sweep and the interval is jittered. Every
+account acting at `:00`, and ticks landing on exact multiples of five minutes
+forever, are both patterns — and not being a pattern is the entire premise.
+
+**Failure isolation** at two levels: one account with expired cookies must not
+cost the other nineteen their day, and one failed stage must not cost that account
+its other two. Errors are counted and reported, never raised, so a partial sweep
+is still a tick that tells you what went wrong. Exception *type* names are
+recorded because a transport failure, an expired cookie and a bug can all arrive
+as a bare string.
+
+**Tests (30).** Deliberately about judgement rather than loop mechanics: the two
+refusals; `ALLOW_UNCAPPED_SENDING` being ignored; the lease excluding a second
+holder and not deleting a successor's claim; sync-before-send ordering; isolation
+at both levels; sync cadence suppressing a second sync; account spacing; jitter;
+a dry run not reaching the engine at all; the loop surviving a failing tick; and
+the heartbeat being recorded, including without Redis.
+
+Verified beyond the suite by running it: both refusal paths print their guidance
+and exit 2, and a dry run against SQLite with two seeded accounts swept **one** —
+correctly excluding the `SUSPENDED` one — and previewed the real plan from the
+real planner (`stage: observe`, five likes).
+
+**A bug the suite could not have caught, found by running the API.** With
+`SCHEDULER_IN_PROCESS=true` the scheduler produced **no observable output at
+all**. Two causes stacking:
+
+1. Uvicorn attaches handlers only to the `uvicorn.*` loggers, so the root logger
+   has none and Python falls back to `logging.lastResort`, which emits WARNING and
+   above. Every tick summary is INFO, so all of them were dropped — as was
+   "scheduler starting".
+2. The heartbeat was stored only in Redis, and the mode guaranteed not to have
+   Redis is the dry run.
+
+So the configuration most likely to be *watched* — a dry run inside the API, which
+is how you inspect the scheduler before letting it act — was the one that reported
+nothing. That is exactly the "up but doing nothing, invisibly" state this package
+is written to prevent, reproduced by the package itself.
+
+Fixed both ways: `ensure_logging_is_visible()` attaches a handler only when
+nobody else has configured logging (so the worker is not double-logged), and the
+tick is recorded in process memory as well as Redis, with `last_tick` preferring
+Redis — which is still required when the API must report on a *separate* worker it
+cannot see. Confirmed by booting the API and reading both the log and
+`/healthz` → `scheduler_last_tick`.
+
+Suite: **223 passing**, stable across 3 consecutive runs.
+
+### 5.4 Found while building: the planner ignores the account's timezone
+
+**Not fixed — it needs your call.** `plan_day` calls
+`_scatter(count, start_hour, end_hour, day, rng)` without a `tz`, and `_scatter`
+defaults to `tz: timezone = timezone.utc` (`src/warmup/planner.py:86`). So
+`caps.timezone_of()` is stored on the account, returned by `describe()` and typed
+in the frontend, but **the planner never reads it**: every account's active window
+is 08:00–19:00 **UTC** regardless of configuration.
+
+Until now this was invisible, because nothing ticked — the window was theoretical.
+The scheduler makes it real.
+
+The consequence is not subtle. An account configured `America/Los_Angeles` has its
+activity planned for 08:00–19:00 UTC, which is 00:00–11:00 local: it does its
+LinkedIn engagement overnight, every day, forever. That is *itself* a detection
+signature — precisely what the warm-up programme exists to avoid.
+
+The scheduler deliberately does **not** work around it. It has no active-window
+logic of its own: it defers entirely to the planner, so the two cannot disagree.
+Had it filtered on local hours it would have skipped exactly the accounts the
+planner had scheduled work for, and most actions would never have fired.
+
+**The fix is one argument** (`_scatter(..., tz=ZoneInfo(timezone_of(account) or
+"UTC"))`), but it changes *when* every non-UTC account acts, which is a behaviour
+change to the warm-up programme rather than a bug fix in the scheduler — so it is
+recorded here rather than bundled in. It should be done before the first non-UTC
+account runs autonomously.
+
+---
+
+## 6. Change log
 
 | Date | Entry |
 |---|---|
@@ -521,4 +726,6 @@ own eyes before trusting the success response.
 | 2026-08-12 | Resumed. State verified against the repo: `HEAD` still `10f9fcd`, 27 files uncommitted, 192 passing — the §1 table was accurate. |
 | 2026-08-12 | 2.7 added: the §2.2 open decision resolved by the user — `0002` aborts, never deletes. Writing the test for it exposed that the abort left DDL behind on SQLite and broke its own documented recovery path; check moved above all DDL. Suite 193. |
 | 2026-08-12 | **Work committed** on `hardening/campaign-auth-and-migrations` in the three-commit split from §3.2. §3's "nothing is committed" warning is now historical. |
-| 2026-08-12 | Change 5 deferred by the user (account to be obtained later). Change 7 (scheduler) brought forward, since it needs no live account — see §6. |
+| 2026-08-12 | Change 5 deferred by the user (account to be obtained later). Change 7 (scheduler) brought forward, since it needs no live account — see §5. |
+| 2026-08-12 | §5 added: the scheduler (`src/scheduler`). Separate worker, refuses without Redis, off by default with a dry run — all three chosen by the user. The no-op `SchedulerAgent` / `scheduler-agent` compose service was found and retired. Suite 223. |
+| 2026-08-12 | §5.4 added as an **open item**: the planner ignores each account's configured timezone, so every window is 08:00–19:00 UTC. Harmless until now because nothing ticked; the scheduler makes it real. Not fixed — it changes warm-up behaviour and needs a decision. |
