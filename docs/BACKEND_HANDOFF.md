@@ -65,7 +65,8 @@ Key modules:
 | Area | Path | Status |
 |---|---|---|
 | FastAPI app + SPA serving | `src/api/main.py` | REAL |
-| Campaign CRUD | `src/campaigns/*`, `src/api/routes/campaigns.py` | REAL |
+| Campaign CRUD (authed, org-scoped) | `src/campaigns/*`, `src/api/routes/campaigns.py` | REAL |
+| Schema migrations | `alembic/`, `scripts/migrate.py` | REAL |
 | Identity/tenancy (Clerk) | `src/api/middleware/clerk.py`, `src/tenancy/*` | REAL |
 | Connected accounts | `src/accounts/*`, `src/api/routes/accounts.py` | REAL |
 | Credential encryption (Fernet) | `src/accounts/crypto.py` | REAL |
@@ -96,8 +97,35 @@ Key modules:
 ## 2. Data model (Postgres, SQLAlchemy 2.0 async)
 
 Single `Base` (`src/database/models.py`), cross-dialect types (works on Postgres
-and SQLite). `AUTO_CREATE_TABLES=true` bootstraps schema on boot (Alembic is the
-production path — PLANNED).
+and SQLite).
+
+**Alembic is the production path (REAL).** `scripts/migrate.py` runs before the
+server in the Docker/Railway start command and is idempotent. Revisions:
+
+- `0001_baseline` — the schema exactly as `AUTO_CREATE_TABLES` was building it.
+- `0002_campaign_org_scope` — adds `campaigns.org_id` + `created_by_user_id`,
+  backfilling rows that predate tenancy into the oldest organization.
+
+`0002` **never deletes data.** If campaigns predate tenancy and no organization
+exists to adopt them, it aborts the deploy with the row count and two ways
+forward (create the owning org, or delete the rows deliberately) rather than
+guessing an owner. The check runs before any DDL, so the abort is a true no-op
+and re-running after fixing it just works — on SQLite too, where DDL is not
+transactional.
+
+The split matters: a database created by `create_all` before Alembic existed has
+every table but no `alembic_version`, so `alembic upgrade head` would try to
+re-create them and fail forever. `scripts/migrate.py` detects that case, stamps
+`0001`, and upgrades from there — no manual step, no crash-loop. Don't squash the
+two revisions or that path breaks.
+
+`AUTO_CREATE_TABLES` is now a **local-only** shortcut and is `false` in the
+image. Leave it off anywhere deployed: create_all inventing tables no migration
+describes is how a schema drifts out from under its own history.
+
+`tests/test_migrations.py` runs the migrations for real and fails if the
+resulting schema differs from the models — so a model change without a migration
+is caught in CI rather than in production.
 
 REAL tables:
 - **Organization** (`clerk_org_id`, `whatsapp_admin_number`, `settings`)
@@ -448,9 +476,21 @@ saves nothing, unauthenticated), `POST|GET /targeting/targets`,
 All of the above are org-scoped and require auth. Full request/response shapes
 in the Frontend Handoff. OpenAPI at `/docs`.
 
-Known gaps to close: **campaigns** are still not org-scoped/authed (add
-`Depends(get_request_context)` + filter by `org_id`); the WS server is not
-implemented, so the UI polls.
+**Campaigns are now org-scoped and authenticated** (they were neither). Every
+route depends on `get_request_context`, and `CampaignService` /
+`CampaignRepository` take a required `org_id` — there is no unscoped mode and no
+`org_id=None` sentinel, because a repository you can build without a tenant is
+the defect itself. Another org's campaign returns **404, not 403**: 403 confirms
+the id exists. Idempotency keys are namespaced per org for the same reason —
+they are client-chosen, so a shared namespace let a replayed key return another
+org's campaign as the "cached" response.
+
+The one campaign write with no request context is the orchestrator callback; it
+is `campaigns.service.apply_task_result`, a module function that derives the
+tenant from the task's own campaign, so the service could keep `org_id`
+mandatory.
+
+Known gaps to close: the WS server is not implemented, so the UI polls.
 
 ---
 
@@ -474,7 +514,8 @@ implemented, so the UI polls.
 - **Agent runtime** is a separate process (`python main.py --agents ...`) not yet
   deployed; deploy it as a second Railway service with Redis attached to activate
   execution.
-- **Tests:** `pytest` (150 passing). CI-friendly, no external services —
+- **Tests:** `pytest` (172 passing, stable across repeated runs). CI-friendly,
+  no external services —
   in-memory SQLite, fakeredis, injected Clerk JWKS, and a recording transport
   (`tests/conftest.py`) that captures what *would* have been sent.
 
@@ -493,11 +534,17 @@ implemented, so the UI polls.
    all three are available as API calls but nothing drives them on a tick, so
    warm-up activity has to be triggered rather than just happening. **This is
    the biggest remaining gap** — the programme is built but not yet autonomous.
-4. **Bind the warm-up planner to real content**: the planner says "do 9 likes
-   at these times"; it still needs a source of *which* posts to like and
-   comment on (ICP feed / target activity via `fetch_activity`).
-5. WebSocket server (`/ws/updates`) so the approval queue updates live instead
+4. ~~Bind the warm-up planner to real content.~~ **DONE** — `src/warmup/runner.py`
+   draws engagement from the account's own ICP via `fetch_activity`, auto-runs
+   likes/follows, and routes comments and posts to the approval queue.
+5. ~~Fix the flaky warm-up runner tests.~~ **DONE** — they failed ~50% of runs
+   because the plan is seeded by `(account_id, day)` with a random account and
+   the real clock, and `observe` plans likes at `probability=0.8` (one day in
+   five is deliberately empty). Tests now search for a day this account really
+   is scheduled to act, and ask at end-of-day so nothing is merely early. See
+   the module docstring in `tests/test_warmup_runner.py`.
+6. WebSocket server (`/ws/updates`) so the approval queue updates live instead
    of polling.
-6. Org-scope + auth the legacy campaign routes.
-7. Per-account worker containerization (§8); WhatsApp ingestion; smart inbox;
+7. ~~Org-scope + auth the legacy campaign routes.~~ **DONE** — see §9.
+8. Per-account worker containerization (§8); WhatsApp ingestion; smart inbox;
    content calendar/coaching. (Full phasing in the plan file.)
