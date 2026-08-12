@@ -44,9 +44,13 @@ async def lifespan(app: FastAPI):
     app.state.redis = None
     app.state.task_orchestrator = None
 
-    # Bootstrap schema creation for first deploys (Postgres or SQLite). For
-    # production migrations use Alembic; this is a convenience for greenfield
-    # environments and is off unless explicitly enabled.
+    # Local convenience only: build the schema straight from the models.
+    #
+    # Deployments do NOT use this — they run `scripts/migrate.py` before the
+    # server starts (see the Dockerfile CMD). Enabling it in production would
+    # let create_all invent tables no migration describes, and the next real
+    # migration would then be written against a schema nobody can reproduce.
+    # Off unless explicitly enabled.
     if os.getenv("AUTO_CREATE_TABLES", "").lower() == "true":
         try:
             from src.database.models import Base, import_all_models
