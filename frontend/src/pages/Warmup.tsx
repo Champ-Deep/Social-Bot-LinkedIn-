@@ -15,6 +15,7 @@ import {
   Check,
   CheckCircle2,
   Clock,
+  ExternalLink,
   Heart,
   Lock,
   MessageSquare,
@@ -27,7 +28,13 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { accountApi, preflight, warmupApi } from '@/lib/api';
-import type { Funnel, HealthVerdict, PreflightReport } from '@/types';
+import type {
+  Funnel,
+  HealthVerdict,
+  PreflightReport,
+  WarmupActivityItem,
+  WarmupRunResult,
+} from '@/types';
 
 const STAGE_ICON: Record<string, typeof Heart> = {
   observe: Activity,
@@ -49,6 +56,7 @@ export function Warmup() {
   const queryClient = useQueryClient();
   const [accountId, setAccountId] = useState('');
   const [report, setReport] = useState<PreflightReport | null>(null);
+  const [runResult, setRunResult] = useState<RunOutcome | null>(null);
 
   const { data: accounts = [] } = useQuery({
     queryKey: ['accounts'],
@@ -73,6 +81,17 @@ export function Warmup() {
   const runPreflight = useMutation({
     mutationFn: () => preflight(accountId),
     onSuccess: setReport,
+  });
+
+  const runNow = useMutation({
+    mutationFn: () => warmupApi.run(accountId),
+    onSuccess: (result) => {
+      setRunResult({ result });
+      queryClient.invalidateQueries({ queryKey: ['warmup-today'] });
+      queryClient.invalidateQueries({ queryKey: ['warmup-activity'] });
+    },
+    onError: (err: any) =>
+      setRunResult({ error: err?.response?.data?.detail ?? 'Could not run the warm-up' }),
   });
 
   const togglePause = useMutation({
@@ -102,23 +121,24 @@ export function Warmup() {
     <div className="max-w-5xl mx-auto px-4 py-8">
       <header className="flex flex-wrap items-start justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-100">Warm-up</h1>
+          <h1 className="font-display text-2xl font-semibold text-slate-100">Warm-up</h1>
           <p className="text-slate-400 mt-1">
             A new account earns its way to outreach over about{' '}
             {programme?.minimum_days_to_outreach ?? 21} days. Nothing is skipped.
           </p>
         </div>
 
-        <div className="flex items-end gap-2">
-          <label className="flex flex-col gap-1">
+        <div className="flex items-end gap-2 flex-wrap">
+          <label className="flex flex-col gap-1 min-w-0">
             <span className="text-xs text-slate-400">Account</span>
             <select
               value={accountId}
               onChange={(e) => {
                 setAccountId(e.target.value);
                 setReport(null);
+                setRunResult(null);
               }}
-              className="select"
+              className="select min-w-0"
             >
               {accounts.map((a) => (
                 <option key={a.id} value={a.id}>
@@ -130,7 +150,7 @@ export function Warmup() {
           <button
             onClick={() => runPreflight.mutate()}
             disabled={runPreflight.isPending}
-            className="btn-ghost"
+            className="btn-ghost shrink-0 whitespace-nowrap"
             title="Read-only check — sends nothing"
           >
             <RefreshCw
@@ -139,10 +159,26 @@ export function Warmup() {
             />
             Test connection
           </button>
+          <button
+            onClick={() => runNow.mutate()}
+            disabled={runNow.isPending || !accountId}
+            className="btn-primary shrink-0 whitespace-nowrap"
+            title="Do whatever is due right now: likes happen, comments go to Approvals"
+          >
+            {runNow.isPending ? (
+              <RefreshCw size={15} className="animate-spin" />
+            ) : (
+              <Play size={15} />
+            )}
+            {runNow.isPending ? 'Running…' : 'Run now'}
+          </button>
         </div>
       </header>
 
       {report && <PreflightPanel report={report} onDismiss={() => setReport(null)} />}
+      {runResult && (
+        <RunResultPanel outcome={runResult} onDismiss={() => setRunResult(null)} />
+      )}
 
       {isLoading || !today ? (
         <div className="flex justify-center py-16 text-slate-400">
@@ -264,6 +300,8 @@ export function Warmup() {
               )}
             </div>
           </section>
+
+          <LikedPosts accountId={accountId} />
         </>
       )}
     </div>
@@ -475,4 +513,168 @@ function PreflightPanel({
       )}
     </motion.div>
   );
+}
+
+// What the account has really liked, newest first. The plan above says what it
+// intends to do; this is the record of what it did, with a link to each post.
+function LikedPosts({ accountId }: { accountId: string }) {
+  const { data: likes = [], isLoading } = useQuery({
+    queryKey: ['warmup-activity', accountId, 'like'],
+    queryFn: () => warmupApi.activity(accountId, 'like'),
+    enabled: !!accountId,
+    refetchInterval: 60_000,
+  });
+
+  return (
+    <section className="mt-8">
+      <h2 className="text-sm font-medium text-slate-300 mb-3">Liked posts</h2>
+      <div className="rounded-xl bg-slate-800/60 border border-slate-700 p-5">
+        {isLoading ? (
+          <p className="text-sm text-slate-500">Loading&hellip;</p>
+        ) : likes.length === 0 ? (
+          <p className="text-sm text-slate-500">
+            Nothing liked yet. Each post appears here as soon as it is liked.
+          </p>
+        ) : (
+          <ul className="divide-y divide-slate-700/60 max-h-96 overflow-y-auto">
+            {likes.map((item) => (
+              <LikedPostRow key={item.id} item={item} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function LikedPostRow({ item }: { item: WarmupActivityItem }) {
+  const ok = item.status === 'ok';
+  return (
+    <li className="py-3 first:pt-0 last:pb-0 flex items-start gap-3">
+      <Heart
+        className={clsx(
+          'w-4 h-4 mt-0.5 shrink-0',
+          ok ? 'text-rose-400 fill-rose-400/30' : 'text-slate-500',
+        )}
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2 flex-wrap text-sm">
+          <span className="text-slate-100 font-medium">
+            {item.person ?? 'Unknown person'}
+          </span>
+          {item.at && (
+            <time className="text-xs text-slate-500 tabular-nums">
+              {new Date(item.at).toLocaleString([], {
+                day: 'numeric',
+                month: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+              })}
+            </time>
+          )}
+          {!ok && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/10 text-red-300">
+              {item.status === 'blocked' ? 'Blocked by LinkedIn' : 'Failed'}
+            </span>
+          )}
+        </div>
+        {item.post_text && (
+          <p className="text-xs text-slate-400 mt-1 line-clamp-2">{item.post_text}</p>
+        )}
+        {!ok && item.error && (
+          <p className="text-xs text-red-300/80 mt-1 truncate">{item.error}</p>
+        )}
+      </div>
+      {item.url && (
+        <a
+          href={item.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="shrink-0 inline-flex items-center gap-1 text-xs text-sky-300 hover:text-sky-200"
+        >
+          Open post
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
+      )}
+    </li>
+  );
+}
+
+type RunOutcome = { result?: WarmupRunResult; error?: string };
+
+// Plain-language reasons for the runner's skip keys. Unknown keys fall back to
+// the raw key so a new reason still shows up rather than vanishing.
+const SKIP_REASON: Record<string, string> = {
+  paused: 'Warm-up is paused. Press Resume.',
+  not_unlocked: 'Some actions are not unlocked yet at this warm-up stage.',
+  like_at_cap: "Today's like limit is reached. More tomorrow.",
+  follow_at_cap: "Today's follow limit is reached. More tomorrow.",
+  comment_at_cap: "Today's comment limit is reached. More tomorrow.",
+  no_like_target:
+    'No posts to like. Pick a Target profile on the LinkedIn Accounts page and find people for it first.',
+  no_follow_target: 'No new people to follow from the Target profile.',
+  like_failed: 'LinkedIn refused some likes. Check the account is still connected.',
+  follow_failed: 'LinkedIn refused some follows. Check the account is still connected.',
+  no_post_to_comment_on: 'No recent post to draft a comment on.',
+  post_needs_a_draft: 'A post is due, but posts need a draft written first.',
+};
+
+function RunResultPanel({
+  outcome,
+  onDismiss,
+}: {
+  outcome: RunOutcome;
+  onDismiss: () => void;
+}) {
+  const { result, error } = outcome;
+  const likes = result?.performed.filter((p) => p.action === 'like').length ?? 0;
+  const ok = !error && (result?.performed.length ?? 0) > 0;
+  const skipped = Object.entries(result?.skipped ?? {});
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={clsx(
+        'rounded-xl border p-4 mb-6 text-sm',
+        error
+          ? 'bg-red-500/10 border-red-500/40 text-red-200'
+          : ok
+            ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
+            : 'bg-slate-700/40 border-slate-600 text-slate-200',
+      )}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-medium">
+            {error
+              ? error
+              : likes > 0
+                ? `Liked ${likes} post${likes === 1 ? '' : 's'}. They're listed under "Liked posts" below.`
+                : capitalize(result?.message ?? '')}
+          </p>
+          {likes > 0 && result?.message && (
+            <p className="mt-1 opacity-80">Everything done: {result.message}</p>
+          )}
+          {skipped.length > 0 && (
+            <ul className="mt-2 space-y-1 opacity-90">
+              {skipped.map(([key, count]) => (
+                <li key={key}>
+                  · {SKIP_REASON[key] ?? key}
+                  {count > 1 && ` (${count})`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <button onClick={onDismiss} className="btn-ghost shrink-0">
+          Dismiss
+        </button>
+      </div>
+    </motion.div>
+  );
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
