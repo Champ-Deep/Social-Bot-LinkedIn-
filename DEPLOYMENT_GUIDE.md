@@ -1722,3 +1722,5 @@ chmod +x scripts/verify-deployment.sh
 
 *Verified against source code — May 2025*
 *Report inaccuracies via GitHub issues*
+
+> Railway topology (web, worker, scheduler), variables, cutover and rollback: see [docs/RAILWAY_SERVICES.md](docs/RAILWAY_SERVICES.md).
