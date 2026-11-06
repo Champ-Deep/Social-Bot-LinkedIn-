@@ -13,6 +13,9 @@ services:
       # Database - Supabase
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
       # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_REDIS=true
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
@@ -27,7 +30,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -36,6 +39,48 @@ services:
     volumes:
       - app_data:/app/data
       - app_logs:/app/logs
+    networks:
+      - linkedin-network
+
+  # Campaign worker: consumes the campaign:tasks Redis Stream
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.jobs.worker
+    environment:
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - REDIS_URL=redis://redis:6379/0
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - AUTO_CREATE_TABLES=false
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true  # no HTTP port; liveness is the Redis heartbeat on /healthz
+    restart: unless-stopped
+    networks:
+      - linkedin-network
+
+  # Scheduler: exactly one replica
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.jobs.scheduler
+    environment:
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
+      - REDIS_URL=redis://redis:6379/0
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - AUTO_CREATE_TABLES=false
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    restart: unless-stopped
     networks:
       - linkedin-network
 

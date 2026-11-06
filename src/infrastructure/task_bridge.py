@@ -1,18 +1,11 @@
 """
-Campaign <-> agent runtime bridge.
+Campaign -> worker bridge.
 
-The API process and the agent runtime are two separate processes that share
-Redis. ``CampaignService`` already calls
-``orchestrator.submit_linkedin_automation_task(...)`` to hand work to the
-agents, but no such object existed. ``MessageOrchestrator`` is that object.
-
-It is deliberately thin and Redis-only (never touches the in-memory
-``AgentOrchestrator.agents`` map): for each (url x account) it publishes a
-``queue_interaction`` command on the ``agent_type:interaction`` channel that the
-interaction agents subscribe to, records the task metadata under
-``task:{task_id}``, and returns the task id. Completion flows back the other way
-as ``events:interaction_completed`` / ``events:interaction_failed`` events,
-which the API-side consumer maps to ``CampaignService.update_task_status``.
+The API and the worker (``python -m src.jobs.worker``) are separate processes
+that share Redis. For each (url x account) ``MessageOrchestrator`` adds an entry
+to the ``campaign:tasks`` Redis Stream, records the task metadata under
+``task:{task_id}`` and returns the task id. The worker consumes the stream and
+calls ``CampaignService.update_task_status`` when a task is final.
 """
 
 from __future__ import annotations
@@ -22,6 +15,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
+
+from src.jobs.streams import enqueue
 
 INTERACTION_CHANNEL = "agent_type:interaction"
 TASK_KEY_PREFIX = "task:"
@@ -51,6 +46,7 @@ class MessageOrchestrator:
         comment: bool = False,
         priority: int = 1,
         source: str = "",
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Submit one target URL for automation across the given accounts.
@@ -59,7 +55,7 @@ class MessageOrchestrator:
         single ``task_id`` identifying this URL submission (one CampaignTask row
         maps to one task_id).
         """
-        task_id = str(uuid.uuid4())
+        task_id = task_id or str(uuid.uuid4())  # reuse on resume
         actions = {"like": bool(like), "comment": bool(comment)}
         accounts = [str(a) for a in account_ids]
 
@@ -78,18 +74,22 @@ class MessageOrchestrator:
         )
         await self.redis.expire(f"{TASK_KEY_PREFIX}{task_id}", TASK_TTL_SECONDS)
 
-        # Fan the work out to the interaction agents, one command per account.
+        # One stream entry per account; the worker (src/jobs/worker.py) consumes them.
+        # Unlike pub/sub, entries wait for a consumer instead of vanishing.
         for account_id in accounts:
-            command = {
-                "type": "queue_interaction",
-                "task_id": task_id,
-                "url": url,
-                "account_id": account_id,
-                "actions": actions,
-                "priority": priority,
-                "source": source,
-            }
-            await self.redis.publish(self.channel, json.dumps(command))
+            await enqueue(
+                self.redis,
+                {
+                    "task_id": task_id,
+                    "url": url,
+                    "account_id": account_id,
+                    "like": "1" if actions["like"] else "0",
+                    "comment": "1" if actions["comment"] else "0",
+                    "priority": priority,
+                    "source": source,
+                    "attempt": 0,
+                },
+            )
 
         return task_id
 
