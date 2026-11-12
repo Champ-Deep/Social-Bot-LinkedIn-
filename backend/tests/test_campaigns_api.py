@@ -262,12 +262,10 @@ class TestIdempotency:
 class TestCampaignExecution:
     """Tests for campaign execution."""
 
-    async def test_start_campaign(self, api_client, issue_token, sample_campaign_data):
+    async def test_start_campaign_without_a_queue_is_refused(self, api_client, issue_token, sample_campaign_data):
         """
-        Starting moves the campaign to running.
-
-        No orchestrator is attached under the test transport, so zero tasks are
-        submitted — the service's documented degraded path.
+        With no Redis the queue is unset, so nothing could ever send: start
+        answers 503 and the campaign stays a draft rather than reporting RUNNING.
         """
         token = issue_token("user_start", org="org_start")
         created = await create_campaign(api_client, token, sample_campaign_data)
@@ -278,13 +276,9 @@ class TestCampaignExecution:
             headers=auth(token, str(uuid.uuid4())),
         )
 
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "running"
-        assert data["campaign_id"] == campaign_id
-
+        assert resp.status_code == 503
         after = await api_client.get(f"/api/v1/campaigns/{campaign_id}", headers=auth(token))
-        assert after.json()["status"] == "running"
+        assert after.json()["status"] == "draft"
 
     async def test_start_missing_campaign_is_404(self, api_client, issue_token):
         token = issue_token("user_missing", org="org_missing")

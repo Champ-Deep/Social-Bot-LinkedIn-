@@ -5,7 +5,7 @@ The API and the worker (``python -m src.jobs.worker``) are separate processes
 that share Redis. For each (url x account) ``MessageOrchestrator`` adds an entry
 to the ``campaign:tasks`` Redis Stream, records the task metadata under
 ``task:{task_id}`` and returns the task id. The worker consumes the stream and
-calls ``CampaignService.update_task_status`` when a task is final.
+calls ``campaigns.service.apply_task_result`` when a task is final.
 """
 
 from __future__ import annotations

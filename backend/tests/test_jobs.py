@@ -63,17 +63,22 @@ async def test_stats_counts_live_workers(redis_client):
 
 
 @pytest_asyncio.fixture
-async def running(db, warm_account, redis_client):
+async def org_id(org):
+    return org[0].id
+
+
+@pytest_asyncio.fixture
+async def running(db, warm_account, redis_client, org_id):
     """A RUNNING campaign with one pending task for the warm account."""
     await streams.ensure_group(redis_client)
-    campaign = await CampaignRepository(db).create(
+    campaign = await CampaignRepository(db, org_id).create(
         CampaignCreate(
             name="c",
             target_urls=["https://www.linkedin.com/posts/x-activity-123-abc"],
             account_ids=[str(warm_account.id)],
         )
     )
-    await CampaignRepository(db).update_status(campaign.id, CampaignStatusEnum.RUNNING)
+    await CampaignRepository(db, org_id).update_status(campaign.id, CampaignStatusEnum.RUNNING)
     orch = MessageOrchestrator(redis_client)
     task_id = await orch.submit_linkedin_automation_task(
         url="https://www.linkedin.com/posts/x-activity-123-abc",
@@ -159,9 +164,9 @@ async def test_missing_task_row_defers(db, redis_client, transport):
     assert (await streams.stats(redis_client))["delayed"] == 1
 
 
-async def test_paused_campaign_entry_is_dropped(db, redis_client, running, transport):
+async def test_paused_campaign_entry_is_dropped(db, redis_client, running, transport, org_id):
     campaign, task_id, entry = running
-    await CampaignRepository(db).update_status(campaign.id, CampaignStatusEnum.PAUSED)
+    await CampaignRepository(db, org_id).update_status(campaign.id, CampaignStatusEnum.PAUSED)
     assert await _handle(redis_client, db, entry, transport) == "dropped"
     assert [c for c in transport.calls if c[0] == "like"] == []
 
@@ -169,26 +174,26 @@ async def test_paused_campaign_entry_is_dropped(db, redis_client, running, trans
 # ---------------------------------------------------------------- service / API
 
 
-async def test_start_without_queue_raises_and_leaves_state(db):
-    campaign = await CampaignRepository(db).create(
+async def test_start_without_queue_raises_and_leaves_state(db, org_id):
+    campaign = await CampaignRepository(db, org_id).create(
         CampaignCreate(name="c", target_urls=["https://www.linkedin.com/posts/a-activity-1-x"], account_ids=["a"])
     )
     with pytest.raises(QueueUnavailableError):
-        await CampaignService(session=db).start_campaign(campaign.id)
+        await CampaignService(session=db, org_id=org_id).start_campaign(campaign.id)
     await db.refresh(campaign)
     assert campaign.status == CampaignStatusEnum.DRAFT.value
 
 
-async def test_resume_reenqueues_pending_rows_only(db, redis_client):
+async def test_resume_reenqueues_pending_rows_only(db, redis_client, org_id):
     await streams.ensure_group(redis_client)
-    campaign = await CampaignRepository(db).create(
+    campaign = await CampaignRepository(db, org_id).create(
         CampaignCreate(name="c", target_urls=["https://www.linkedin.com/posts/a-activity-1-x", "https://www.linkedin.com/posts/b-activity-2-x"], account_ids=["a"])
     )
     await CampaignTaskRepository(db).create_bulk(campaign.id, [("t-pending", "https://www.linkedin.com/posts/a-activity-1-x"), ("t-done", "https://www.linkedin.com/posts/b-activity-2-x")])
     await CampaignTaskRepository(db).update_status("t-done", "completed")
-    await CampaignRepository(db).update_status(campaign.id, CampaignStatusEnum.PAUSED)
+    await CampaignRepository(db, org_id).update_status(campaign.id, CampaignStatusEnum.PAUSED)
 
-    svc = CampaignService(session=db, orchestrator=MessageOrchestrator(redis_client))
+    svc = CampaignService(session=db, org_id=org_id, orchestrator=MessageOrchestrator(redis_client))
     res = await svc.start_campaign(campaign.id)
 
     assert res.tasks_created == 1
@@ -198,17 +203,17 @@ async def test_resume_reenqueues_pending_rows_only(db, redis_client):
     assert len(rows) == 2  # no duplicates
 
 
-async def test_api_start_without_queue_is_503(monkeypatch):
-    from src.api.main import app
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        async def boom(self, *a, **k):
-            raise QueueUnavailableError("down")
-
-        monkeypatch.setattr(CampaignService, "start_campaign", boom)
-        r = await client.post(
-            f"/api/v1/campaigns/{uuid.uuid4()}/start", headers={"X-Idempotency-Key": str(uuid.uuid4())}
-        )
+async def test_api_start_without_queue_is_503(api_client, issue_token):
+    token = issue_token("user_503", org="org_503")
+    auth = {"Authorization": f"Bearer {token}"}
+    payload = {"name": "c", "target_urls": ["https://linkedin.com/posts/test-123"], "account_ids": [str(uuid.uuid4())]}
+    created = await api_client.post(
+        "/api/v1/campaigns", json=payload, headers={**auth, "X-Idempotency-Key": str(uuid.uuid4())}
+    )
+    r = await api_client.post(
+        f"/api/v1/campaigns/{created.json()['id']}/start",
+        headers={**auth, "X-Idempotency-Key": str(uuid.uuid4())},
+    )  # no Redis under the test transport, so no queue
     assert r.status_code == 503
 
 

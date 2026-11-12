@@ -288,8 +288,8 @@ class CampaignService:
                 campaign_id, [(str(uuid.uuid4()), u) for u in failed_urls]
             )
             for row in created:
-                await self.update_task_status(
-                    row.orchestrator_task_id, "failed", {"error": "enqueue failed"}
+                await apply_task_result(
+                    self.session, row.orchestrator_task_id, "failed", {"error": "enqueue failed"}
                 )
 
         # Update campaign status

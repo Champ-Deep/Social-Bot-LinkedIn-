@@ -22,7 +22,7 @@ from src.accounts import caps as caps_policy
 from src.accounts.models import AccountStatus
 from src.accounts.service import AccountError, get_account_record, load_live_account
 from src.campaigns.models import Campaign, CampaignStatusEnum, CampaignTask
-from src.campaigns.service import CampaignService
+from src.campaigns.service import apply_task_result
 from src.database.models import import_all_models
 from src.infrastructure.rate_policy import AccountRateLimiter
 from src.infrastructure.transports.base import TransportChallenge, TransportError
@@ -65,8 +65,8 @@ async def _finalize(r, db, f: dict) -> None:
     result = {"accounts": expected, "done": done, "failed": failed, "errors": errors}
     if actions.get("comment"):
         result["skipped"] = "comment: no comment text source in v1"
-    await CampaignService(session=db).update_task_status(
-        f["task_id"], "completed" if failed == 0 else "failed", result
+    await apply_task_result(
+        db, f["task_id"], "completed" if failed == 0 else "failed", result
     )
 
 
