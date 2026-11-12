@@ -20,7 +20,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -144,6 +144,46 @@ async def _by_ref(db: AsyncSession, org_id: str, ref: str) -> Optional[OutreachS
     ).scalar_one_or_none()
 
 
+async def _resolve_target(db: AsyncSession, org_id: str, account, tgt) -> OutreachTarget:
+    """Find this person on the account by any identifier a row can hold; import only if absent.
+
+    import_targets dedupes on member_urn alone, so a person stored under a real
+    LinkedIn urn or a differently cased handle would get a second, unsuppressed row.
+    An existing row's status (suppressed, not interested) decides, so a refused row wins.
+    """
+    slug = (targeting_service.public_id_from_url(tgt.profile_url) or "").lower()
+    rows = (
+        await db.execute(
+            select(OutreachTarget).where(
+                OutreachTarget.account_id == account.id,
+                or_(
+                    func.lower(OutreachTarget.member_urn) == slug,
+                    func.lower(OutreachTarget.public_id) == slug,
+                    OutreachTarget.profile_url.ilike(f"%/in/{slug}%"),
+                ),
+            )
+        )
+    ).scalars().all()
+    # ilike is a superset (underscore wildcard, longer slugs): confirm in Python.
+    found = [
+        r for r in rows
+        if slug in (
+            (r.member_urn or "").lower(),
+            (r.public_id or "").lower(),
+            (targeting_service.public_id_from_url(r.profile_url) or "").lower(),
+        )
+    ]
+    if found:
+        return next((r for r in found if r.status in REFUSED_TARGETS), found[0])
+    item = TargetImportItem(
+        profile_url=tgt.profile_url, full_name=tgt.full_name, company=tgt.company
+    )
+    created, _ = await targeting_service.import_targets(
+        db, org_id=org_id, account_id=str(account.id), items=[item]
+    )
+    return created[0]
+
+
 @router.post("", status_code=201)
 async def create_external_suggestion(
     response: Response,
@@ -165,25 +205,7 @@ async def create_external_suggestion(
     if account is None:
         raise HTTPException(status_code=404, detail="account_not_found")
 
-    # Existing targeting service: dedupes by profile on this account, and a
-    # target already on file keeps whatever status (including suppressed) it has.
-    item = TargetImportItem(
-        profile_url=payload.target.profile_url,
-        full_name=payload.target.full_name,
-        company=payload.target.company,
-    )
-    await targeting_service.import_targets(
-        db, org_id=org_id, account_id=str(account.id), items=[item]
-    )
-    target = (
-        await db.execute(
-            select(OutreachTarget).where(
-                OutreachTarget.account_id == account.id,
-                OutreachTarget.member_urn
-                == targeting_service.public_id_from_url(payload.target.profile_url),
-            )
-        )
-    ).scalar_one()
+    target = await _resolve_target(db, org_id, account, payload.target)
 
     row = OutreachSuggestion(
         id=uuid.uuid4(),

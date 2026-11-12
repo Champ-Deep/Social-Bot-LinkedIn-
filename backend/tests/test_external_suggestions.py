@@ -7,6 +7,7 @@ Fixtures use example names and the example profile URL only (public repo).
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -396,3 +397,53 @@ async def test_an_inactive_account_reads_as_blocked(env):
     got = (await _get(env, created["id"])).json()
     assert got["status"] == "blocked"
     assert "auth_required" in got["reason"]
+
+
+async def _seed_suppressed(env, member_urn, profile_url):
+    async with env["Session"]() as db:
+        db.add(
+            OutreachTarget(
+                id=uuid.uuid4(),
+                org_id=uuid.UUID(env["org_id"]),
+                account_id=uuid.UUID(env["account_id"]),
+                member_urn=member_urn,
+                public_id="example-test-profile",
+                profile_url=profile_url,
+                full_name="Example Person",
+                status=TargetStatus.SUPPRESSED,
+            )
+        )
+        await db.commit()
+
+
+async def _assert_blocked_and_never_sent(env, res, transport, rate_limiter):
+    assert res.status_code == 201
+    assert res.json()["status"] == "blocked"
+    assert "suppressed" in res.json()["reason"]
+    async with env["Session"]() as db:
+        assert len((await db.execute(select(OutreachTarget))).scalars().all()) == 1
+    await _run_due(env, transport, rate_limiter)
+    assert transport.calls == []
+
+
+async def test_suppressed_target_stored_under_a_real_urn_is_not_duplicated(
+    env, transport, rate_limiter, in_hours
+):
+    await _seed_suppressed(env, "urn:li:fsd_profile:ACoAAExampleOnly", URL)
+    await _assert_blocked_and_never_sent(env, await _post(env, "probe-1"), transport, rate_limiter)
+
+
+async def test_suppressed_target_is_found_through_a_case_variant_handle(
+    env, transport, rate_limiter, in_hours
+):
+    await _seed_suppressed(env, "example-test-profile", URL)
+    res = await _post(
+        env,
+        "probe-2",
+        target={
+            "profile_url": "https://www.linkedin.com/in/Example-Test-Profile",
+            "full_name": "Example Person",
+            "company": None,
+        },
+    )
+    await _assert_blocked_and_never_sent(env, res, transport, rate_limiter)
