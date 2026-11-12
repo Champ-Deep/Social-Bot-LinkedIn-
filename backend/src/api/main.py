@@ -24,6 +24,7 @@ from src.api.routes import (
     agents,
     campaigns,
     me,
+    external_suggestions,
     outreach,
     targeting,
     warmup,
@@ -219,6 +220,8 @@ app.include_router(accounts.router, prefix=API_V1_PREFIX)
 app.include_router(targeting.router, prefix=API_V1_PREFIX)
 app.include_router(outreach.router, prefix=API_V1_PREFIX)
 app.include_router(warmup.router, prefix=API_V1_PREFIX)
+# Service to service handoff, mounted at /api (not /api/v1) to match the fixed contract.
+app.include_router(external_suggestions.router, prefix="/api")
 
 # Real-time update streams. Mounted at the root (not under /api/v1) because
 # the SPA connects to `ws://host/ws/updates` directly.

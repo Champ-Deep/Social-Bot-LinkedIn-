@@ -105,6 +105,12 @@ class OutreachSuggestion(Base):
     reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     reviewed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid)
 
+    # Set only for text written and approved elsewhere (Harbinger) and submitted
+    # through the service API; unique so a retried submit can never double-queue.
+    external_ref: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, unique=True, index=True
+    )
+
     result: Mapped[Optional[dict]] = mapped_column(JSON)
     error: Mapped[Optional[str]] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0)

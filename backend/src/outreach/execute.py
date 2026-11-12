@@ -35,6 +35,11 @@ from src.targeting.models import OutreachTarget, TargetStatus
 logger = logging.getLogger(__name__)
 
 
+# Never contact: a person who said no, or was suppressed. Checked at send time too,
+# because the decision can land after the action was approved and queued.
+REFUSED_TARGETS = (TargetStatus.SUPPRESSED, TargetStatus.NOT_INTERESTED)
+
+
 class ExecutionBlocked(Exception):
     """The action was refused by a safety gate. Carries the reason."""
 
@@ -219,6 +224,11 @@ async def execute_suggestion(
         raise ExecutionBlocked("outside the account's active hours; rescheduled")
 
     target = await _load_target(db, suggestion)
+    if target is not None and target.status in REFUSED_TARGETS:
+        suggestion.status = SuggestionStatus.BLOCKED
+        suggestion.error = f"target is {target.status}"
+        await db.commit()
+        raise ExecutionBlocked(suggestion.error)
     text = suggestion.final_text or suggestion.draft_text or ""
 
     # Re-run the gate at send time: this is the last point of control.
