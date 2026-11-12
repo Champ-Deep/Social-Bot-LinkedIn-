@@ -10,11 +10,13 @@ import { motion } from 'framer-motion';
 import {
   AlertTriangle,
   CheckCircle2,
+  Globe,
   HelpCircle,
   Loader2,
   Plus,
   RefreshCw,
   ShieldCheck,
+  KeyRound,
   Trash2,
 } from 'lucide-react';
 import { clsx } from 'clsx';
@@ -39,6 +41,11 @@ const STATUS_LABEL: Record<AccountStatus, string> = {
   error: 'Error',
 };
 
+const PROXY_HINT =
+  'Use a sticky address that stays the same: for DataImpulse, a port from 10000 up ' +
+  '(a different one per account), not 823. A proxy that changes address gets the ' +
+  'account signed out. We test it before saving.';
+
 export function Accounts() {
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
@@ -59,7 +66,7 @@ export function Accounts() {
     <div className="max-w-4xl mx-auto px-4 py-8">
       <header className="flex items-start justify-between mb-6 gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-100">Accounts</h1>
+          <h1 className="font-display text-2xl font-semibold text-slate-100">LinkedIn Accounts</h1>
           <p className="text-slate-400 mt-1">
             The LinkedIn identities this system acts as.
           </p>
@@ -126,6 +133,7 @@ function ConnectForm({
   const [jsessionid, setJsessionid] = useState('');
   const [label, setLabel] = useState('');
   const [mode, setMode] = useState<'outreach' | 'account_based_engagement'>('outreach');
+  const [proxyUrl, setProxyUrl] = useState('');
   const [showHelp, setShowHelp] = useState(false);
 
   const connect = useMutation({
@@ -135,6 +143,7 @@ function ConnectForm({
         jsessionid: jsessionid.trim() || undefined,
         label: label.trim() || undefined,
         mode,
+        proxy_url: proxyUrl.trim() || undefined,
       }),
     onSuccess: (account) => {
       if (account.status !== 'active') {
@@ -238,13 +247,26 @@ function ConnectForm({
             </option>
           </select>
         </label>
+
+        <label className="flex flex-col gap-1 sm:col-span-2">
+          <span className="text-xs text-slate-400">Proxy (recommended)</span>
+          <input
+            type="password"
+            value={proxyUrl}
+            onChange={(e) => setProxyUrl(e.target.value)}
+            placeholder="http://login__cr.in:password@gw.dataimpulse.com:10000"
+            className="input font-mono"
+            autoComplete="off"
+          />
+          <span className="text-xs text-slate-500">{PROXY_HINT}</span>
+        </label>
       </div>
 
-      <div className="flex items-center gap-3 mt-5">
+      <div className="flex items-center gap-3 mt-5 flex-wrap">
         <button
           onClick={() => connect.mutate()}
           disabled={connect.isPending || liAt.trim().length < 20}
-          className="btn-primary"
+          className="btn-primary shrink-0 whitespace-nowrap"
         >
           {connect.isPending ? (
             <Loader2 size={16} className="animate-spin" />
@@ -272,12 +294,16 @@ function AccountRow({
   onChanged: () => void;
   onError: (message: string) => void;
 }) {
+  const [showCookie, setShowCookie] = useState(false);
+
   const verify = useMutation({
     mutationFn: () => accountApi.verify(account.id),
     onSuccess: (result) => {
       if (!result.ok) onError(result.error ?? 'That session is no longer valid.');
       onChanged();
     },
+    onError: (err: any) =>
+      onError(err?.response?.data?.detail ?? 'Could not verify that account'),
   });
 
   const update = useMutation({
@@ -345,6 +371,17 @@ function AccountRow({
             Verify
           </button>
           <button
+            onClick={() => setShowCookie((v) => !v)}
+            className={clsx(
+              'btn-ghost',
+              account.status === 'auth_required' && 'text-amber-300',
+            )}
+            title="Paste a fresh li_at cookie, keeping all settings"
+          >
+            <KeyRound size={15} />
+            Update cookie
+          </button>
+          <button
             onClick={() => disconnect.mutate()}
             disabled={disconnect.isPending}
             className="btn-ghost text-red-400 hover:bg-red-500/10"
@@ -354,6 +391,18 @@ function AccountRow({
           </button>
         </div>
       </div>
+
+      {showCookie && (
+        <CookieUpdate
+          account={account}
+          onDone={() => {
+            setShowCookie(false);
+            onChanged();
+          }}
+          onCancel={() => setShowCookie(false)}
+          onError={onError}
+        />
+      )}
 
       {/* Policy */}
       <div className="grid gap-4 sm:grid-cols-2 mt-4 pt-4 border-t border-slate-700">
@@ -388,6 +437,8 @@ function AccountRow({
         </label>
       </div>
 
+      <ProxySetting account={account} onChanged={onChanged} onError={onError} />
+
       <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3 text-xs text-slate-400">
         <span>
           Invites{' '}
@@ -406,6 +457,9 @@ function AccountRow({
           <span className="text-slate-200">
             {account.policy?.active_hours?.[0]}:00–{account.policy?.active_hours?.[1]}:00
           </span>
+          {account.policy?.timezone && (
+            <span className="text-slate-500"> {account.policy.timezone} time</span>
+          )}
         </span>
         <span>
           Review queue{' '}
@@ -413,6 +467,187 @@ function AccountRow({
             max {account.policy?.suggestion_budget ?? '—'}/day
           </span>
         </span>
+      </div>
+    </div>
+  );
+}
+
+function ProxySetting({
+  account,
+  onChanged,
+  onError,
+}: {
+  account: ConnectedAccount;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState('');
+  const proxy = account.proxy;
+
+  const save = useMutation({
+    mutationFn: (url: string) => accountApi.update(account.id, { proxy_url: url }),
+    onSuccess: () => {
+      setEditing(false);
+      setProxyUrl('');
+      onChanged();
+    },
+    onError: (err: any) =>
+      onError(err?.response?.data?.detail ?? 'Could not save that proxy'),
+  });
+
+  return (
+    <div className="mt-4 pt-4 border-t border-slate-700 text-sm">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="min-w-0 flex items-center gap-2">
+          <Globe size={15} className={proxy ? 'text-emerald-400' : 'text-amber-400'} />
+          {proxy ? (
+            <span className="text-slate-300 truncate">
+              Proxy <span className="text-slate-100 font-mono">{proxy.host}</span>
+              {proxy.ip && (
+                <span className="text-slate-400">
+                  {' '}· goes out as {proxy.ip}
+                  {(proxy.city || proxy.country) &&
+                    ` (${[proxy.city, proxy.country].filter(Boolean).join(', ')})`}
+                </span>
+              )}
+            </span>
+          ) : (
+            <span className="text-amber-200">
+              No proxy. LinkedIn sees the server's address, which can get this account
+              signed out.
+            </span>
+          )}
+        </div>
+        {!editing && (
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={() => setEditing(true)} className="btn-ghost">
+              {proxy ? 'Change' : 'Add proxy'}
+            </button>
+            {proxy && (
+              <button
+                onClick={() => save.mutate('')}
+                disabled={save.isPending}
+                className="btn-ghost text-slate-400"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-3 flex flex-col gap-2">
+          <div className="flex gap-2 flex-wrap">
+            <input
+              type="password"
+              value={proxyUrl}
+              onChange={(e) => setProxyUrl(e.target.value)}
+              placeholder="http://login__cr.in:password@gw.dataimpulse.com:10000"
+              className="input font-mono flex-1 min-w-0"
+              autoComplete="off"
+              autoFocus
+            />
+            <button
+              onClick={() => save.mutate(proxyUrl.trim())}
+              disabled={save.isPending || !proxyUrl.trim()}
+              className="btn-primary shrink-0"
+            >
+              {save.isPending && <Loader2 size={15} className="animate-spin" />}
+              {save.isPending ? 'Testing…' : 'Test & save'}
+            </button>
+            <button onClick={() => setEditing(false)} className="btn-ghost shrink-0">
+              Cancel
+            </button>
+          </div>
+          <span className="text-xs text-slate-500">{PROXY_HINT}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CookieUpdate({
+  account,
+  onDone,
+  onCancel,
+  onError,
+}: {
+  account: ConnectedAccount;
+  onDone: () => void;
+  onCancel: () => void;
+  onError: (message: string) => void;
+}) {
+  const [liAt, setLiAt] = useState('');
+  const [jsessionid, setJsessionid] = useState('');
+
+  // Replaces only the session cookies; proxy, caps and warm-up progress stay.
+  const save = useMutation({
+    mutationFn: () =>
+      accountApi.rotateCredentials(account.id, {
+        li_at: liAt.trim(),
+        jsessionid: jsessionid.trim() || undefined,
+      }),
+    onSuccess: (updated) => {
+      if (updated.status !== 'active') {
+        onError(
+          'LinkedIn rejected that cookie. Copy li_at again from a browser where you are signed in.',
+        );
+      }
+      onDone();
+    },
+    onError: (err: any) =>
+      onError(err?.response?.data?.detail ?? 'Could not update the cookie'),
+  });
+
+  return (
+    <div className="mt-4 pt-4 border-t border-slate-700">
+      <p className="text-sm text-slate-300 mb-3">
+        Paste fresh cookies from a browser signed in to LinkedIn. Settings, proxy and
+        warm-up progress are kept.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-slate-400">li_at cookie (required)</span>
+          <input
+            type="password"
+            value={liAt}
+            onChange={(e) => setLiAt(e.target.value)}
+            placeholder="AQEDAT…"
+            className="input font-mono"
+            autoComplete="off"
+            autoFocus
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-slate-400">JSESSIONID (needed to send anything)</span>
+          <input
+            type="password"
+            value={jsessionid}
+            onChange={(e) => setJsessionid(e.target.value)}
+            placeholder="ajax:1234567890"
+            className="input font-mono"
+            autoComplete="off"
+          />
+        </label>
+      </div>
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          onClick={() => save.mutate()}
+          disabled={save.isPending || liAt.trim().length < 20}
+          className="btn-primary"
+        >
+          {save.isPending ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <ShieldCheck size={15} />
+          )}
+          {save.isPending ? 'Checking…' : 'Save & verify'}
+        </button>
+        <button onClick={onCancel} className="btn-ghost">
+          Cancel
+        </button>
       </div>
     </div>
   );

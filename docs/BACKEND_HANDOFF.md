@@ -27,8 +27,8 @@ and how the **admin dashboard** aggregates activity across all accounts.
   rate, with automatic demotion on a challenge or a collapsed acceptance rate.
 - **The mobile transport now calls real Voyager endpoints** (whoami, invite,
   message, like, comment, post, profile, inbox) over a TLS-fingerprinted
-  session with a stable per-account device identity, with Playwright as the
-  fallback. It is validated against a recording transport in tests but has not
+  session with a stable per-account device identity, with a real browser
+  (browser-harness driving a per-account headless Chrome) as the fallback. It is validated against a recording transport in tests but has not
   yet been proven against a live LinkedIn account — see §4 for exactly what
   that means.
 - Multi-account is modeled *and used* (Org → User → ConnectedAccount), and the
@@ -65,7 +65,8 @@ Key modules:
 | Area | Path | Status |
 |---|---|---|
 | FastAPI app + SPA serving | `src/api/main.py` | REAL |
-| Campaign CRUD | `src/campaigns/*`, `src/api/routes/campaigns.py` | REAL |
+| Campaign CRUD (authed, org-scoped) | `src/campaigns/*`, `src/api/routes/campaigns.py` | REAL |
+| Schema migrations | `alembic/`, `scripts/migrate.py` | REAL |
 | Identity/tenancy (Clerk) | `src/api/middleware/clerk.py`, `src/tenancy/*` | REAL |
 | Connected accounts | `src/accounts/*`, `src/api/routes/accounts.py` | REAL |
 | Credential encryption (Fernet) | `src/accounts/crypto.py` | REAL |
@@ -87,7 +88,7 @@ Key modules:
 | Campaign→agent bridge | `src/infrastructure/task_bridge.py` | REAL |
 | Transport interface + router | `src/infrastructure/api_client.py`, `transports/*` | REAL interface |
 | Mobile transport endpoints | `src/infrastructure/transports/mobile.py` | REAL, unvalidated live |
-| Playwright transport | `src/infrastructure/transports/playwright.py` | REAL adapter, not bound |
+| Browser fallback | `transports/browser.py`, `harness_executor.py`, `chrome_pool.py` | REAL, bound; like/comment/fetch_inbox only, unvalidated live |
 | Agent runtime | `src/agents/*`, `src/infrastructure/orchestrator.py` | mixed (see §4) |
 | Skeleton agents | `safety/scheduler/whatsapp_monitor/analytics_agent.py` | SCAFFOLD |
 
@@ -96,8 +97,35 @@ Key modules:
 ## 2. Data model (Postgres, SQLAlchemy 2.0 async)
 
 Single `Base` (`src/database/models.py`), cross-dialect types (works on Postgres
-and SQLite). `AUTO_CREATE_TABLES=true` bootstraps schema on boot (Alembic is the
-production path — PLANNED).
+and SQLite).
+
+**Alembic is the production path (REAL).** `scripts/migrate.py` runs before the
+server in the Docker/Railway start command and is idempotent. Revisions:
+
+- `0001_baseline` — the schema exactly as `AUTO_CREATE_TABLES` was building it.
+- `0002_campaign_org_scope` — adds `campaigns.org_id` + `created_by_user_id`,
+  backfilling rows that predate tenancy into the oldest organization.
+
+`0002` **never deletes data.** If campaigns predate tenancy and no organization
+exists to adopt them, it aborts the deploy with the row count and two ways
+forward (create the owning org, or delete the rows deliberately) rather than
+guessing an owner. The check runs before any DDL, so the abort is a true no-op
+and re-running after fixing it just works — on SQLite too, where DDL is not
+transactional.
+
+The split matters: a database created by `create_all` before Alembic existed has
+every table but no `alembic_version`, so `alembic upgrade head` would try to
+re-create them and fail forever. `scripts/migrate.py` detects that case, stamps
+`0001`, and upgrades from there — no manual step, no crash-loop. Don't squash the
+two revisions or that path breaks.
+
+`AUTO_CREATE_TABLES` is now a **local-only** shortcut and is `false` in the
+image. Leave it off anywhere deployed: create_all inventing tables no migration
+describes is how a schema drifts out from under its own history.
+
+`tests/test_migrations.py` runs the migrations for real and fails if the
+resulting schema differs from the models — so a model change without a migration
+is caught in CI rather than in production.
 
 REAL tables:
 - **Organization** (`clerk_org_id`, `whatsapp_admin_number`, `settings`)
@@ -146,7 +174,7 @@ live LinkedIn account. Precisely:
 
 What's REAL and tested:
 - `LinkedInTransport` protocol and the `CompositeTransport` router
-  (`api_client.py`): tries mobile first, falls back to Playwright on
+  (`api_client.py`): tries mobile first, falls back to the browser on
   `TransportUnavailable`/`TransportChallenge`.
 - Per-account **device fingerprint** generation (stable UA / device-id / OS /
   app-version + curl_cffi TLS-impersonation profile): `transports/fingerprints.py`.
@@ -165,10 +193,22 @@ What is NOT yet proven:
   shapes drift; the endpoint bodies here are written against the shapes the
   first-party clients use, but until they run against a real session we cannot
   claim they work. Expect to iterate on the exact payloads.
-- The **Playwright fallback executor is still not bound**
-  (`get_transport(..., playwright_executor=None)`), so if a mobile shape is
-  wrong today the fallback cannot rescue it — the action fails cleanly and the
-  suggestion is marked `failed` with the error recorded.
+- The **browser fallback** (`HarnessExecutor`, bound by default in
+  `get_transport`) covers only `like`, `comment` and `fetch_inbox`. Everything
+  else fails cleanly with `browser executor lacks <action>`. It runs
+  [browser-harness](https://github.com/browser-use/browser-harness) as a
+  subprocess against a per-account headless Chrome from `ChromePool`: own
+  profile dir, own loopback DevTools port, and the account's proxy (a local
+  `pproxy` forwarder when the proxy has credentials). `fetch_inbox` reads the
+  JSON LinkedIn's own `/messaging/` page fetches, rather than scraping the DOM,
+  so no thread gets marked read. None of its selectors or payload shapes have
+  been confirmed against a live session yet.
+  - browser-harness lives in its **own venv** (`requirements-harness.txt`,
+    `HARNESS_PYTHON`) because it pins `websockets==15` and the app pins `<13`.
+  - Its telemetry would upload script text, so `BH_TELEMETRY=0` is always set
+    and cookies and arguments only ever travel in env vars.
+  - The previous Playwright executor is preserved on the `playwright-fallback`
+    git branch.
 - The agent runtime's session bridge (`InteractionAgent._wait_for_response`)
   remains BROKEN, so the *agent-runtime* path still can't act. The outreach
   loop does not depend on it — it calls transports directly from the API.
@@ -183,11 +223,12 @@ What is NOT yet proven:
 3. Fix payloads as needed. Because each action tries multiple shapes and the
    composite falls back, a wrong guess degrades to a clean failure rather than
    a corrupted send.
-4. Then bind the Playwright executor as the safety net for shapes that break.
+4. The browser fallback is already bound; check `detail.fell_back_from` on a
+   result to see when it rescued a mobile shape.
 
 Ban-risk posture (why mobile-first): mobile-API traffic with stable per-account
 fingerprints + the global daily caps (§5) is far lower risk than headless
-Chromium. Playwright stays as the fallback only.
+Chromium. The browser stays as the fallback only.
 
 ---
 
@@ -448,9 +489,21 @@ saves nothing, unauthenticated), `POST|GET /targeting/targets`,
 All of the above are org-scoped and require auth. Full request/response shapes
 in the Frontend Handoff. OpenAPI at `/docs`.
 
-Known gaps to close: **campaigns** are still not org-scoped/authed (add
-`Depends(get_request_context)` + filter by `org_id`); the WS server is not
-implemented, so the UI polls.
+**Campaigns are now org-scoped and authenticated** (they were neither). Every
+route depends on `get_request_context`, and `CampaignService` /
+`CampaignRepository` take a required `org_id` — there is no unscoped mode and no
+`org_id=None` sentinel, because a repository you can build without a tenant is
+the defect itself. Another org's campaign returns **404, not 403**: 403 confirms
+the id exists. Idempotency keys are namespaced per org for the same reason —
+they are client-chosen, so a shared namespace let a replayed key return another
+org's campaign as the "cached" response.
+
+The one campaign write with no request context is the orchestrator callback; it
+is `campaigns.service.apply_task_result`, a module function that derives the
+tenant from the task's own campaign, so the service could keep `org_id`
+mandatory.
+
+Known gaps to close: the WS server is not implemented, so the UI polls.
 
 ---
 
@@ -474,7 +527,8 @@ implemented, so the UI polls.
 - **Agent runtime** is a separate process (`python main.py --agents ...`) not yet
   deployed; deploy it as a second Railway service with Redis attached to activate
   execution.
-- **Tests:** `pytest` (150 passing). CI-friendly, no external services —
+- **Tests:** `pytest` (172 passing, stable across repeated runs). CI-friendly,
+  no external services —
   in-memory SQLite, fakeredis, injected Clerk JWKS, and a recording transport
   (`tests/conftest.py`) that captures what *would* have been sent.
 
@@ -485,19 +539,98 @@ implemented, so the UI polls.
 1. **Validate the mobile endpoints against one real account** (§4). This is the
    single highest-value next step: everything else is built and tested, and this
    is the only thing standing between the loop and real sends.
-2. **Bind the Playwright executor** as the fallback, so a drifted Voyager shape
-   degrades to a slower send rather than a failure.
-3. **Deploy the agent runtime / a scheduled job** that, per account per day,
-   calls `warmup.service.today()` to get the activity plan and executes it,
-   then `outreach.sync.sync_account()` and `outreach.execute.run_due()`. Today
-   all three are available as API calls but nothing drives them on a tick, so
-   warm-up activity has to be triggered rather than just happening. **This is
-   the biggest remaining gap** — the programme is built but not yet autonomous.
-4. **Bind the warm-up planner to real content**: the planner says "do 9 likes
-   at these times"; it still needs a source of *which* posts to like and
-   comment on (ICP feed / target activity via `fetch_activity`).
-5. WebSocket server (`/ws/updates`) so the approval queue updates live instead
+2. ~~Bind a browser executor as the fallback.~~ **DONE** for like/comment/
+   fetch_inbox via browser-harness (§4). Validate its selectors live next.
+3. ~~Deploy the agent runtime / a scheduled job that drives warm-up, sync and
+   send on a tick.~~ **DONE** — `src/scheduler`, see §12. Off by default until
+   the mobile transport is validated (step 1); `SCHEDULER_ENABLED=true
+   SCHEDULER_DRY_RUN=true` shows what it would do without acting.
+4. ~~Bind the warm-up planner to real content.~~ **DONE** — `src/warmup/runner.py`
+   draws engagement from the account's own ICP via `fetch_activity`, auto-runs
+   likes/follows, and routes comments and posts to the approval queue.
+5. ~~Fix the flaky warm-up runner tests.~~ **DONE** — they failed ~50% of runs
+   because the plan is seeded by `(account_id, day)` with a random account and
+   the real clock, and `observe` plans likes at `probability=0.8` (one day in
+   five is deliberately empty). Tests now search for a day this account really
+   is scheduled to act, and ask at end-of-day so nothing is merely early. See
+   the module docstring in `tests/test_warmup_runner.py`.
+6. WebSocket server (`/ws/updates`) so the approval queue updates live instead
    of polling.
-6. Org-scope + auth the legacy campaign routes.
-7. Per-account worker containerization (§8); WhatsApp ingestion; smart inbox;
+7. ~~Org-scope + auth the legacy campaign routes.~~ **DONE** — see §9.
+8. Per-account worker containerization (§8); WhatsApp ingestion; smart inbox;
    content calendar/coaching. (Full phasing in the plan file.)
+
+---
+
+## 12. The scheduler — what makes the programme autonomous
+
+`src/scheduler`, run as `python -m src.scheduler`. Every few minutes it sweeps
+every account, across every organization, and does three things per account:
+
+1. `outreach.sync.sync_account` — pull acceptance and reply state back
+2. `warmup.runner.run_today` — perform whatever the day's plan says is due
+3. `outreach.execute.run_due` — send approved suggestions that are due
+
+**The order is not alphabetical.** Sync runs first because it is what cancels a
+sequence when somebody has replied. Sending first would let a tick deliver a
+follow-up into a conversation that already had an answer waiting — the worst
+thing this product can do, because the prospect sees it. One tick's delay
+noticing a reply is acceptable; talking over it is not.
+
+**Why a plain loop rather than Celery or APScheduler.** The engine was already
+built to be ticked: `run_today` performs only what is due, subtracts work already
+done today and honours the pause flag; `run_due` filters on `scheduled_for` in
+SQL. So a missed tick is not a missed action and a duplicated tick is not
+duplicated activity, which removes the reasons to want cron semantics, misfire
+policy or a durable job store. A job store would also become a second source of
+truth about what should run, drifting from the DB whenever an account is paused
+or deleted.
+
+**Two things it refuses to do**, both in `src/scheduler/config.py`:
+
+- **Run when not explicitly enabled.** `SCHEDULER_ENABLED` defaults to false. It
+  drives real writes to real accounts, and step 1 above has not happened yet.
+- **Run live without Redis.** The caps are enforced by a Redis-backed limiter,
+  and it does **not** honour `ALLOW_UNCAPPED_SENDING`. That override exists for a
+  human pressing a button; an unattended loop with no ceiling is a different
+  decision, and it is how an account gets restricted. A dry run needs no Redis,
+  since it executes nothing.
+
+Refusals exit non-zero with an operator-facing explanation rather than idling — a
+process that is up but doing nothing is the state this module exists to prevent.
+
+**One ticker at a time.** A Redis lease (`scheduler:lease`, SET NX EX with an
+owner token and compare-and-delete release) means two concurrent sweeps cannot
+both see the same rate budget and both spend it. That is easy to arrange by
+accident — a second web replica with `SCHEDULER_IN_PROCESS` set, a worker
+deployed alongside one, or an overlapping deploy — and the symptom is *more
+activity*, not an error, so it is enforced in code rather than by convention.
+
+**Liveness is reported separately from output**, on `/healthz` as `scheduler` and
+`scheduler_last_tick`. This matters more than it sounds: the warm-up programme has
+deliberately quiet days (`observe` plans likes at `probability=0.8`, so one day in
+five does nothing, and the planner says *"A deliberately quiet day — real accounts
+have them"*). "No activity" is therefore never evidence of a fault, so absence of
+activity can never be the alarm — the scheduler has to assert its own aliveness.
+
+**Deploying it on Railway.** A second service from the same repo and image, with
+start command `python -m src.scheduler` and no healthcheck path (it serves no
+HTTP; use the heartbeat on the API's `/healthz` instead). It needs `DATABASE_URL`,
+`REDIS_URL`, `ENCRYPTION_KEY` and `SCHEDULER_ENABLED=true`. Do not set
+`SCHEDULER_IN_PROCESS` there — that is the local-development shape, and with more
+than one web replica it would put a ticker in each.
+
+Sync gets its own slower cadence (`SCHEDULER_SYNC_INTERVAL_SECONDS`, default 30
+minutes) because unlike the other two stages it always costs LinkedIn requests
+and can never return early. Cadence is tracked as a Redis key with a TTL — the
+key existing *means* "synced recently" — so there is no timestamp arithmetic and
+losing the record costs one extra read-only sync.
+
+Pacing: accounts are spaced within a sweep and the interval is jittered, because
+every account acting at `:00` and ticks landing on exact multiples of five minutes
+forever are both patterns, and not being a pattern is the entire premise.
+
+⚠️ **`SchedulerAgent` in `src/agents/core/` is not this.** It is a no-op skeleton
+kept so the legacy orchestrator can boot; its docstring now points here. The
+`docker-compose` service that used to run it (booting healthy and doing nothing)
+now runs the real scheduler.
