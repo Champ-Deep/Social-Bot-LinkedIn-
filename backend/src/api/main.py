@@ -39,11 +39,11 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan.
 
-    Connects Redis and attaches the campaign<->agent task bridge
+    Connects Redis and attaches the campaign task queue
     (``MessageOrchestrator``) to ``app.state`` so campaign starts hand work to
-    the interaction agents. If Redis is unreachable the app still boots with the
-    bridge unset, and campaign starts degrade to the "orchestrator not
-    configured" path rather than failing. (The httpx test transport does not run
+    the worker. If Redis is unreachable the app boots with the queue unset
+    (campaign starts then return 503) unless REQUIRE_REDIS=true, which aborts
+    startup instead. (The httpx test transport does not run
     lifespan, so tests always take the degraded path.)
     """
     app.state.redis = None
@@ -71,19 +71,19 @@ async def lifespan(app: FastAPI):
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     try:
-        from redis import asyncio as aioredis
-
         from src.infrastructure.task_bridge import MessageOrchestrator
+        from src.jobs.streams import connect
 
-        client = aioredis.from_url(redis_url, decode_responses=True)
-        await client.ping()
+        client = await connect(redis_url)
         app.state.redis = client
         app.state.task_orchestrator = MessageOrchestrator(client)
         app.state.realtime_forwarder = asyncio.create_task(
             realtime.redis_forwarder(client)
         )
-        logger.info("Connected to Redis; task bridge active")
+        logger.info("Connected to Redis; task queue active")
     except Exception as exc:  # pragma: no cover - depends on runtime env
+        if os.getenv("REQUIRE_REDIS", "").lower() == "true":
+            raise  # fail the deploy loudly instead of booting with no queue
         logger.warning("Redis unavailable (%s); campaign execution degraded", exc)
 
     # Optional in-process scheduler.
@@ -259,6 +259,20 @@ async def healthz(request: Request) -> dict:
             components["database"] = "ok"
     except Exception as exc:  # pragma: no cover - depends on runtime env
         components["database"] = f"error: {exc}"
+
+    if redis is not None and components["redis"] == "ok":
+        from src.jobs import streams
+
+        try:
+            q = await streams.stats(redis)
+            q["status"] = (
+                "ok" if q["workers_alive"] >= 1
+                else "no worker alive (campaigns will queue but not send)"
+            )
+            components["queue"] = q
+            components["scheduler"] = "ok" if await redis.exists(streams.SCHEDULER_HB) else "no heartbeat"
+        except Exception as exc:  # pragma: no cover - depends on runtime env
+            components["queue"] = f"error: {exc}"
 
     components["credentials_encryption"] = (
         "ok" if os.getenv("ENCRYPTION_KEY") else "no ENCRYPTION_KEY (cannot connect accounts)"

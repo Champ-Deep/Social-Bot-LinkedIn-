@@ -45,6 +45,11 @@ class CampaignStateError(CampaignServiceError):
     pass
 
 
+class QueueUnavailableError(CampaignServiceError):
+    """The task queue cannot accept work (maps to HTTP 503)."""
+    pass
+
+
 class IdempotencyKeyExistsError(CampaignServiceError):
     """Idempotency key already exists."""
     def __init__(self, resource_id: uuid.UUID, response_body: dict):
@@ -230,46 +235,62 @@ class CampaignService:
                 f"Must be in {valid_start_states}"
             )
 
-        # Check if orchestrator is available
+        # Without a queue nothing would ever send: refuse rather than report RUNNING.
         if not self.orchestrator:
-            logger.warning("orchestrator_not_configured", campaign_id=str(campaign_id))
-            # Update status anyway for testing without orchestrator
-            await self.campaign_repo.update_status(
-                campaign_id,
-                CampaignStatusEnum.RUNNING,
-                set_started=True
-            )
-            return StartCampaignResponse(
-                campaign_id=campaign_id,
-                status=CampaignStatus.RUNNING,
-                tasks_created=0,
-                message="Campaign started (orchestrator not configured)"
-            )
+            logger.error("orchestrator_not_configured", campaign_id=str(campaign_id))
+            raise QueueUnavailableError("Task queue unavailable (Redis not connected)")
 
-        # Submit tasks to orchestrator
+        submit_kwargs = dict(
+            account_ids=campaign.account_ids,
+            like=campaign.actions.get("like", True),
+            comment=campaign.actions.get("comment", False),
+            priority=campaign.priority,
+            source=f"campaign:{campaign_id}",
+        )
         tasks_data = []
-        for url in campaign.target_urls:
-            try:
-                task_id = await self.orchestrator.submit_linkedin_automation_task(
-                    url=url,
-                    account_ids=campaign.account_ids,
-                    like=campaign.actions.get("like", True),
-                    comment=campaign.actions.get("comment", False),
-                    priority=campaign.priority,
-                    source=f"campaign:{campaign_id}"
-                )
-                tasks_data.append((task_id, url))
-                logger.debug("task_submitted", task_id=task_id, url=url)
-            except Exception as e:
-                logger.error(
-                    "task_submission_failed",
-                    url=url,
-                    error=str(e)
-                )
+        failed_urls = []
+        if campaign.status == CampaignStatusEnum.PAUSED.value:
+            # Resume: re-enqueue the rows still pending; never create duplicates.
+            for row in await self.task_repo.get_by_campaign(campaign_id, "pending"):
+                try:
+                    await self.orchestrator.submit_linkedin_automation_task(
+                        url=row.target_url, task_id=row.orchestrator_task_id, **submit_kwargs
+                    )
+                    tasks_data.append((row.orchestrator_task_id, row.target_url))
+                except Exception as e:
+                    logger.error("task_resubmit_failed", url=row.target_url, error=str(e))
+                    failed_urls.append(row.target_url)
+            if failed_urls and not tasks_data:
+                raise QueueUnavailableError("Could not re-enqueue any pending task")
+            new_rows = []
+        else:
+            # Submit tasks to orchestrator
+            for url in campaign.target_urls:
+                try:
+                    task_id = await self.orchestrator.submit_linkedin_automation_task(
+                        url=url, **submit_kwargs
+                    )
+                    tasks_data.append((task_id, url))
+                    logger.debug("task_submitted", task_id=task_id, url=url)
+                except Exception as e:
+                    logger.error("task_submission_failed", url=url, error=str(e))
+                    failed_urls.append(url)
+            if failed_urls and not tasks_data:
+                raise QueueUnavailableError("Could not enqueue any task")
+            new_rows = tasks_data
 
-        # Create campaign task records
-        if tasks_data:
-            await self.task_repo.create_bulk(campaign_id, tasks_data)
+        # Create campaign task records (worker defers if it sees an entry first)
+        if new_rows:
+            await self.task_repo.create_bulk(campaign_id, new_rows)
+        # URLs that never reached the queue are recorded as failed, not hidden.
+        if failed_urls:
+            created = await self.task_repo.create_bulk(
+                campaign_id, [(str(uuid.uuid4()), u) for u in failed_urls]
+            )
+            for row in created:
+                await self.update_task_status(
+                    row.orchestrator_task_id, "failed", {"error": "enqueue failed"}
+                )
 
         # Update campaign status
         await self.campaign_repo.update_status(
